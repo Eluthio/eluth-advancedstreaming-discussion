@@ -284,6 +284,9 @@ window.__EluthPlugins['participants'] = {
 
     async bootstrap(api) {
         _store.api = api
+        // Always expose api globally — DiscussionControls reads authToken from here.
+        // This runs in every window context (main, streaming popup, join popup).
+        window.__EluthDiscussionApi = api
 
         const params = new URLSearchParams(window.location.search)
         const joinRoomId = params.get('participants_join')
@@ -303,13 +306,9 @@ window.__EluthPlugins['participants'] = {
         }
 
         // ── Advanced streaming control popup ───────────────────────────────────
-        if (params.get('popup') === 'stream-control') {
-            // Store api so DiscussionControls can reach it via window.__EluthDiscussionApi
-            window.__EluthDiscussionApi = api
-            // DiscussionControls is mounted by the advanced streaming popup
-            // infrastructure via window.__EluthPluginControls — nothing else to do here.
-            return
-        }
+        // DiscussionControls is mounted by the advanced streaming popup
+        // infrastructure via window.__EluthPluginControls. Nothing to mount here.
+        if (params.get('popup') === 'stream-control') return
 
         // ── Main window ────────────────────────────────────────────────────────
         // Listen for messages from the controls popup (session start/end, etc.)
