@@ -1,0 +1,9 @@
+{
+  "name": "Discussion",
+  "slug": "participants",
+  "version": "1.0.0",
+  "min_server_version": "1.5.5",
+  "tier": "official",
+  "entry": "index.js",
+  "zones": []
+}
