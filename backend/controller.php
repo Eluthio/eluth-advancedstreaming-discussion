@@ -2,6 +2,8 @@
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Str;
 
 class ParticipantsController
@@ -14,6 +16,37 @@ class ParticipantsController
     private function room(string $id)
     {
         return DB::table('participants_rooms')->where('id', $id)->first();
+    }
+
+    private function ensureTables(): void
+    {
+        if (! Schema::hasTable('participants_rooms')) {
+            Schema::create('participants_rooms', function (Blueprint $table) {
+                $table->char('id', 36)->primary();
+                $table->char('channel_id', 36)->index();
+                $table->char('plugin_room_id', 36);
+                $table->string('host_member_id')->index();
+                $table->string('host_username');
+                $table->string('status', 20)->default('open');
+                $table->timestamp('created_at')->useCurrent();
+                $table->timestamp('updated_at')->nullable();
+            });
+        }
+
+        if (! Schema::hasTable('participants_invites')) {
+            Schema::create('participants_invites', function (Blueprint $table) {
+                $table->char('id', 36)->primary();
+                $table->char('room_id', 36)->index();
+                $table->char('channel_id', 36)->index();
+                $table->string('invited_member_id')->index();
+                $table->string('invited_username');
+                $table->string('host_member_id');
+                $table->string('host_username');
+                $table->string('status', 20)->default('pending');
+                $table->timestamp('created_at')->useCurrent();
+                $table->unique(['room_id', 'invited_member_id']);
+            });
+        }
     }
 
     private function notFound()
@@ -39,6 +72,8 @@ class ParticipantsController
         }
 
         try {
+            $this->ensureTables();
+
             // Close any open rooms this host already has in this channel
             DB::table('participants_rooms')
                 ->where('channel_id', $channelId)
@@ -129,6 +164,7 @@ class ParticipantsController
         $member = $this->member($request);
 
         try {
+            $this->ensureTables();
             $invites = DB::table('participants_invites')
                 ->join('participants_rooms', 'participants_invites.room_id', '=', 'participants_rooms.id')
                 ->where('participants_invites.invited_member_id', $member->central_user_id)
