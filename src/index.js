@@ -370,7 +370,7 @@ function listenForSync() {
 
                     const { res: r2, data: d2 } = await apiFetch('POST', '/api/plugins/participants/rooms',
                         { channel_id: channelId, plugin_room_id: pluginRoomId })
-                    if (!r2.ok) throw new Error(d2.error ?? `HTTP ${r2.status}`)
+                    if (!r2.ok) throw new Error(d2.message ?? d2.error ?? `HTTP ${r2.status}`)
                     const ourRoomId = d2.room?.id
 
                     await startSession(channelId, pluginRoomId, ourRoomId)
