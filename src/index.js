@@ -207,6 +207,7 @@ async function startSession(channelId, pluginRoomId, ourRoomId) {
             method,
             headers: {
                 Authorization: `Bearer ${token()}`,
+                Accept: 'application/json',
                 ...(body ? { 'Content-Type': 'application/json' } : {}),
             },
             ...(body ? { body: JSON.stringify(body) } : {}),
@@ -338,6 +339,7 @@ function listenForSync() {
                 method,
                 headers: {
                     Authorization: `Bearer ${token()}`,
+                    Accept: 'application/json',
                     ...(body ? { 'Content-Type': 'application/json' } : {}),
                 },
                 ...(body ? { body: JSON.stringify(body) } : {}),
@@ -353,7 +355,7 @@ function listenForSync() {
                 const { channelId } = msg
                 try {
                     const { res: r1, data: d1 } = await apiFetch('POST', '/api/plugin-rooms/participants',
-                        { channel_id: channelId, max_players: 12 })
+                        { channel_id: channelId })
                     if (!r1.ok) throw new Error(d1.message ?? `HTTP ${r1.status}`)
                     const pluginRoomId = d1.room?.id
                     if (!pluginRoomId) throw new Error('No plugin_room_id from platform')
