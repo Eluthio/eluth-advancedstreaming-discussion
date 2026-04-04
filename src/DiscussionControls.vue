@@ -52,19 +52,66 @@
             </div>
         </div>
 
-        <!-- ── Connected participants ─────────────────────────────────────── -->
+        <!-- ── Connected participant sources ──────────────────────────────── -->
+        <!-- Each participant's webcam is a separate compositor source.        -->
+        <!-- They can be positioned individually here or via Auto-Layout.      -->
         <div v-if="session.active && peers.length" class="dc-section">
-            <div class="dc-section-title">Participants</div>
-            <div v-for="p in peers" :key="p.memberId" class="dc-peer-row">
-                <span class="dc-peer-dot" :class="`dc-peer-dot--${p.state}`" />
-                <span class="dc-peer-name">{{ p.username }}</span>
-                <span class="dc-peer-slot">Seat {{ p.slotKey?.split('-')[1] }}</span>
+            <div class="dc-section-title">Webcam Sources</div>
+
+            <div v-for="p in peers" :key="p.memberId" class="dc-cam-block">
+                <!-- Header row -->
+                <div class="dc-cam-header" @click="toggleExpanded(p.memberId)">
+                    <span class="dc-peer-dot" :class="`dc-peer-dot--${p.state}`" />
+                    <span class="dc-cam-name">{{ p.username }}</span>
+                    <span class="dc-cam-hint">{{ layerForPeer(p) ? 'In scene' : 'Not in scene' }}</span>
+                    <span class="dc-cam-caret">{{ expandedPeer === p.memberId ? '▲' : '▼' }}</span>
+                </div>
+
+                <!-- Expanded controls -->
+                <div v-if="expandedPeer === p.memberId" class="dc-cam-detail">
+                    <!-- Add to scene / remove -->
+                    <div v-if="!layerForPeer(p)" class="dc-cam-row">
+                        <button class="dc-btn dc-btn--add" @click="addToScene(p)">＋ Add to scene</button>
+                    </div>
+                    <div v-else class="dc-cam-row">
+                        <span class="dc-in-scene-label">In scene</span>
+                        <button class="dc-btn dc-btn--remove" @click="removeFromScene(p)">Remove</button>
+                    </div>
+
+                    <!-- Transform controls (only if in scene) -->
+                    <template v-if="layerForPeer(p)">
+                        <!-- Quick presets -->
+                        <div class="dc-cam-row dc-cam-row--wrap">
+                            <button
+                                v-for="preset in PRESETS"
+                                :key="preset.label"
+                                class="dc-btn dc-btn--preset"
+                                @click="applyPreset(p, preset)"
+                            >{{ preset.label }}</button>
+                        </div>
+
+                        <!-- Fine-grained position -->
+                        <div class="dc-xywh">
+                            <div class="dc-xywh-row" v-for="field in ['x','y','w','h']" :key="field">
+                                <label class="dc-xywh-label">{{ field.toUpperCase() }}</label>
+                                <input
+                                    type="number"
+                                    class="dc-xywh-input"
+                                    step="0.01" min="0" max="1"
+                                    :value="peerTransform(p)[field]"
+                                    @change="onTransformField(p, field, $event.target.value)"
+                                />
+                                <span class="dc-xywh-unit">×1</span>
+                            </div>
+                        </div>
+                    </template>
+                </div>
             </div>
         </div>
 
-        <!-- ── Layout controls ────────────────────────────────────────────── -->
+        <!-- ── Auto-layout ────────────────────────────────────────────────── -->
         <div v-if="session.active" class="dc-section">
-            <div class="dc-section-title">Auto-Layout</div>
+            <div class="dc-section-title">Auto-Layout All</div>
             <div class="dc-form-row">
                 <label class="dc-form-label">Align cams</label>
                 <select class="dc-select" v-model="layout.align" @change="saveSettings">
@@ -107,6 +154,19 @@ const props = defineProps({
     channelId: { type: String, required: true },
 })
 
+// ── Constants ──────────────────────────────────────────────────────────────────
+const PRESETS = [
+    { label: 'Small TL',    x: 0.01,  y: 0.01,  w: 0.22, h: 0.22 },
+    { label: 'Small TR',    x: 0.77,  y: 0.01,  w: 0.22, h: 0.22 },
+    { label: 'Small BL',    x: 0.01,  y: 0.77,  w: 0.22, h: 0.22 },
+    { label: 'Small BR',    x: 0.77,  y: 0.77,  w: 0.22, h: 0.22 },
+    { label: '½ Left',      x: 0,     y: 0,     w: 0.5,  h: 1    },
+    { label: '½ Right',     x: 0.5,   y: 0,     w: 0.5,  h: 1    },
+    { label: 'Full',        x: 0,     y: 0,     w: 1,    h: 1    },
+]
+
+const SETTINGS_KEY = `discussion-settings-${props.channelId}`
+
 // ── State ──────────────────────────────────────────────────────────────────────
 const session        = ref({ active: false, pluginRoomId: null, ourRoomId: null })
 const peers          = ref([])
@@ -114,26 +174,20 @@ const members        = ref([])
 const memberSearch   = ref('')
 const loadingMembers = ref(false)
 const membersLoaded  = ref(false)
-const inviteState    = ref({})   // memberId → 'sending' | 'sent' | 'error'
+const inviteState    = ref({})
 const starting       = ref(false)
 const error          = ref('')
 const applyingLayout = ref(false)
 const layoutError    = ref('')
-
-const SETTINGS_KEY = `discussion-settings-${props.channelId}`
-
-const layout = ref(loadSettings())
-
-// Tracks the compositor's current scene/layer state for layout commands
+const expandedPeer   = ref(null)
 const compositorState = ref(null)
+const layout = ref(loadSettings())
 
 function loadSettings() {
     try {
         const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}')
         return { align: s.align ?? 'right', maxPer: s.maxPer ?? 3 }
-    } catch {
-        return { align: 'right', maxPer: 3 }
-    }
+    } catch { return { align: 'right', maxPer: 3 } }
 }
 
 function saveSettings() {
@@ -150,21 +204,37 @@ const isVerticalAlign = computed(() =>
     layout.value.align === 'right' || layout.value.align === 'left'
 )
 
-const activePeers = computed(() =>
-    peers.value.filter(p => p.state !== 'failed')
-)
+const activePeers = computed(() => peers.value.filter(p => p.state !== 'failed'))
 
 const filteredMembers = computed(() => {
-    const q      = memberSearch.value.trim().toLowerCase()
+    const q       = memberSearch.value.trim().toLowerCase()
     const peerIds = new Set(peers.value.map(p => p.memberId))
     return members.value
         .filter(m => !peerIds.has(m.id ?? m.member_id))
         .filter(m => !q || m.username?.toLowerCase().includes(q))
 })
 
+function activeScene() {
+    return compositorState.value?.scenes?.find(
+        s => s.id === compositorState.value?.activeSceneId
+    )
+}
+
+function layerForPeer(peer) {
+    return activeScene()?.layers?.find(l => l.sourceKey === peer.slotKey) ?? null
+}
+
+function peerTransform(peer) {
+    const layer = layerForPeer(peer)
+    if (!layer) return { x: 0, y: 0, w: 0.22, h: 0.22 }
+    return { x: round4(layer.x), y: round4(layer.y), w: round4(layer.w), h: round4(layer.h) }
+}
+
+function round4(n) { return Math.round((n ?? 0) * 10000) / 10000 }
+
 // ── BroadcastChannels ──────────────────────────────────────────────────────────
-let syncBc       = null   // eluth-discussion-sync  (main window relay)
-let compositorBc = null   // eluth-stream-{channelId} (compositor)
+let syncBc       = null
+let compositorBc = null
 
 function setupChannels() {
     syncBc = new BroadcastChannel('eluth-discussion-sync')
@@ -182,14 +252,9 @@ function handleSyncMessage(msg) {
         case 'state':
         case 'peers-update':
             if (msg.channelId !== props.channelId) return
-            session.value = {
-                active:       msg.active,
-                pluginRoomId: msg.pluginRoomId ?? null,
-                ourRoomId:    msg.ourRoomId    ?? null,
-            }
-            peers.value = msg.peers ?? []
+            session.value = { active: msg.active, pluginRoomId: msg.pluginRoomId ?? null, ourRoomId: msg.ourRoomId ?? null }
+            peers.value   = msg.peers ?? []
             break
-
         case 'room-created':
             if (msg.channelId !== props.channelId) return
             starting.value = false
@@ -197,33 +262,27 @@ function handleSyncMessage(msg) {
             session.value  = { active: true, pluginRoomId: msg.pluginRoomId, ourRoomId: msg.ourRoomId }
             fetchMembers()
             break
-
         case 'room-error':
             starting.value = false
             error.value    = 'Could not start: ' + (msg.error ?? 'Unknown error')
             break
-
         case 'room-closed':
             if (msg.channelId !== props.channelId) return
             session.value = { active: false, pluginRoomId: null, ourRoomId: null }
             peers.value   = []
             break
-
         case 'invite-sent':
             inviteState.value = { ...inviteState.value, [msg.memberId]: 'sent' }
             break
-
         case 'invite-error':
             inviteState.value = { ...inviteState.value, [msg.memberId]: 'error' }
             break
-
         case 'members-data':
             if (msg.channelId !== props.channelId) return
             loadingMembers.value = false
             membersLoaded.value  = true
             members.value        = msg.members ?? []
             break
-
         case 'members-error':
             loadingMembers.value = false
             break
@@ -239,8 +298,7 @@ function startSession() {
 
 function endSession() {
     syncBc.postMessage({
-        type:         'close-room',
-        channelId:    props.channelId,
+        type: 'close-room', channelId: props.channelId,
         pluginRoomId: session.value.pluginRoomId,
         ourRoomId:    session.value.ourRoomId,
     })
@@ -257,25 +315,64 @@ function inviteMember(member) {
     if (!memberId || !session.value.ourRoomId) return
     inviteState.value = { ...inviteState.value, [memberId]: 'sending' }
     syncBc.postMessage({
-        type:      'invite-member',
-        ourRoomId: session.value.ourRoomId,
-        memberId,
-        username:  member.username ?? '',
+        type: 'invite-member', ourRoomId: session.value.ourRoomId,
+        memberId, username: member.username ?? '',
     })
+}
+
+// ── Per-participant source controls ────────────────────────────────────────────
+function toggleExpanded(memberId) {
+    expandedPeer.value = expandedPeer.value === memberId ? null : memberId
+}
+
+function sendTransform(peer, x, y, w, h) {
+    const layer = layerForPeer(peer)
+    if (!layer) return
+    compositorBc.postMessage({ type: 'set-transform', id: layer.id, x, y, w, h })
+}
+
+function applyPreset(peer, preset) {
+    const layer = layerForPeer(peer)
+    if (!layer) return
+    compositorBc.postMessage({ type: 'set-transform', id: layer.id, ...preset, label: undefined })
+}
+
+function onTransformField(peer, field, rawValue) {
+    const val = parseFloat(rawValue)
+    if (isNaN(val)) return
+    const t = peerTransform(peer)
+    t[field] = Math.max(0, Math.min(1, val))
+    sendTransform(peer, t.x, t.y, t.w, t.h)
+}
+
+function addToScene(peer) {
+    compositorBc.postMessage({ type: 'add-layer', sourceKey: peer.slotKey })
+    // Wait for state update then set a sensible default size
+    waitForCompositorState().then(() => {
+        const layer = layerForPeer(peer)
+        if (layer && layer.w === 1 && layer.h === 1) {
+            // Default: small camera in top-right
+            compositorBc.postMessage({ type: 'set-transform', id: layer.id, x: 0.77, y: 0.01, w: 0.22, h: 0.22 })
+        }
+    })
+}
+
+function removeFromScene(peer) {
+    const layer = layerForPeer(peer)
+    if (layer) compositorBc.postMessage({ type: 'remove-layer', id: layer.id })
 }
 
 // ── Auto-layout ────────────────────────────────────────────────────────────────
 function calculatePositions(peerList) {
-    const { align, maxPer }   = layout.value
-    const MARGIN               = 0.015
-    const positions            = []
-    const isVert               = align === 'right' || align === 'left'
+    const { align, maxPer } = layout.value
+    const MARGIN = 0.015
+    const isVert = align === 'right' || align === 'left'
+    const positions = []
 
     if (isVert) {
         const maxPerCol = Math.max(1, maxPer)
-        const camH      = (1 - MARGIN * (maxPerCol + 1)) / maxPerCol
-        const camW      = camH   // 16:9 cam on 16:9 canvas: normalized w == h
-
+        const camH = (1 - MARGIN * (maxPerCol + 1)) / maxPerCol
+        const camW = camH
         peerList.forEach((peer, i) => {
             const col = Math.floor(i / maxPerCol)
             const row = i % maxPerCol
@@ -287,9 +384,8 @@ function calculatePositions(peerList) {
         })
     } else {
         const maxPerRow = Math.max(1, maxPer)
-        const camW      = (1 - MARGIN * (maxPerRow + 1)) / maxPerRow
-        const camH      = camW
-
+        const camW = (1 - MARGIN * (maxPerRow + 1)) / maxPerRow
+        const camH = camW
         peerList.forEach((peer, i) => {
             const col = i % maxPerRow
             const row = Math.floor(i / maxPerRow)
@@ -300,7 +396,6 @@ function calculatePositions(peerList) {
             positions.push({ slotKey: peer.slotKey, x, y, w: camW, h: camH })
         })
     }
-
     return positions
 }
 
@@ -320,30 +415,16 @@ function waitForCompositorState() {
 async function applyLayout() {
     const toPosition = activePeers.value.slice()
     if (!toPosition.length) return
-
     applyingLayout.value = true
     layoutError.value    = ''
-
     try {
-        const activeScene = compositorState.value?.scenes?.find(
-            s => s.id === compositorState.value?.activeSceneId
-        )
-        const existingKeys = new Set((activeScene?.layers ?? []).map(l => l.sourceKey))
-
-        // Add any slots not yet in the current scene
+        const existingKeys = new Set((activeScene()?.layers ?? []).map(l => l.sourceKey))
         const toAdd = toPosition.filter(p => !existingKeys.has(p.slotKey))
-        for (const peer of toAdd) {
-            compositorBc.postMessage({ type: 'add-layer', sourceKey: peer.slotKey })
-        }
+        for (const peer of toAdd) compositorBc.postMessage({ type: 'add-layer', sourceKey: peer.slotKey })
         if (toAdd.length) await waitForCompositorState()
 
-        // Fresh layer list after adds
-        const freshScene  = compositorState.value?.scenes?.find(
-            s => s.id === compositorState.value?.activeSceneId
-        )
-        const freshLayers = freshScene?.layers ?? []
+        const freshLayers = activeScene()?.layers ?? []
         const positions   = calculatePositions(toPosition)
-
         for (const { slotKey, x, y, w, h } of positions) {
             const layer = freshLayers.find(l => l.sourceKey === slotKey)
             if (!layer) continue
@@ -370,7 +451,7 @@ onUnmounted(() => {
 
 <style scoped>
 .dc-root {
-    display: flex; flex-direction: column; gap: 0;
+    display: flex; flex-direction: column;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     color: #e2e8f0; font-size: 12px;
 }
@@ -388,7 +469,7 @@ onUnmounted(() => {
 
 .dc-row { display: flex; align-items: center; }
 .dc-row--spread { justify-content: space-between; }
-.dc-row--gap { gap: 8px; }
+.dc-row--gap    { gap: 8px; }
 
 .dc-live-dot {
     width: 8px; height: 8px; border-radius: 50%;
@@ -408,18 +489,12 @@ onUnmounted(() => {
 .dc-btn:hover:not(:disabled) { opacity: 0.85; }
 
 .dc-btn--primary { background: var(--accent, #a78bfa); color: #fff; width: 100%; padding: 8px 12px; }
-.dc-btn--danger  {
-    background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.3);
-    color: #fca5a5;
-}
-.dc-btn--sm {
-    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12);
-    color: #e2e8f0; padding: 3px 8px;
-}
-.dc-btn--layout {
-    background: rgba(167,139,250,0.15); border: 1px solid rgba(167,139,250,0.3);
-    color: #c4b5fd; width: 100%; padding: 7px; margin-top: 8px;
-}
+.dc-btn--danger  { background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.3); color: #fca5a5; }
+.dc-btn--sm      { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); color: #e2e8f0; padding: 3px 8px; }
+.dc-btn--layout  { background: rgba(167,139,250,0.15); border: 1px solid rgba(167,139,250,0.3); color: #c4b5fd; width: 100%; padding: 7px; margin-top: 8px; }
+.dc-btn--add     { background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.25); color: #86efac; width: 100%; padding: 5px; }
+.dc-btn--remove  { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.2); color: #fca5a5; padding: 3px 8px; }
+.dc-btn--preset  { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: #94a3b8; padding: 3px 7px; font-size: 10px; }
 
 .dc-error { font-size: 11px; color: #f87171; margin-top: 6px; }
 .dc-hint  { font-size: 11px; color: #475569; padding: 4px 0; }
@@ -427,8 +502,7 @@ onUnmounted(() => {
 .dc-input {
     width: 100%; box-sizing: border-box;
     background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 6px; color: #e2e8f0; font-size: 11px;
-    padding: 5px 8px; outline: none;
+    border-radius: 6px; color: #e2e8f0; font-size: 11px; padding: 5px 8px; outline: none;
 }
 .dc-input:focus { border-color: var(--accent, #a78bfa); }
 .dc-input--num  { width: 56px; }
@@ -440,44 +514,56 @@ onUnmounted(() => {
 }
 .dc-select:focus { border-color: var(--accent, #a78bfa); }
 
-.dc-form-row {
-    display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
-}
-.dc-form-label {
-    font-size: 11px; color: #94a3b8; white-space: nowrap; min-width: 80px;
-}
+.dc-form-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.dc-form-label { font-size: 11px; color: #94a3b8; white-space: nowrap; min-width: 80px; }
 
 .dc-member-list {
     display: flex; flex-direction: column; gap: 4px;
-    max-height: 160px; overflow-y: auto; margin-top: 6px;
+    max-height: 140px; overflow-y: auto; margin-top: 6px;
 }
-.dc-member-row {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 8px; padding: 3px 0;
-}
-.dc-member-name {
-    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
+.dc-member-row  { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 0; }
+.dc-member-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.dc-badge {
-    font-size: 10px; font-weight: 600; border-radius: 4px;
-    padding: 2px 6px; flex-shrink: 0;
-}
+.dc-badge { font-size: 10px; font-weight: 600; border-radius: 4px; padding: 2px 6px; flex-shrink: 0; }
 .dc-badge--sending { background: rgba(255,255,255,0.08); color: #94a3b8; }
 .dc-badge--sent    { background: rgba(34,197,94,0.15);   color: #86efac; }
 .dc-badge--error   { background: rgba(239,68,68,0.15);   color: #fca5a5; }
 
-.dc-peer-row {
-    display: flex; align-items: center; gap: 7px; padding: 2px 0;
+/* Participant webcam blocks */
+.dc-cam-block {
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 6px; margin-bottom: 5px; overflow: hidden;
 }
+.dc-cam-header {
+    display: flex; align-items: center; gap: 7px;
+    padding: 6px 8px; cursor: pointer; background: rgba(255,255,255,0.03);
+    user-select: none;
+}
+.dc-cam-header:hover { background: rgba(255,255,255,0.06); }
+.dc-cam-name  { flex: 1; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dc-cam-hint  { font-size: 10px; color: #475569; flex-shrink: 0; }
+.dc-cam-caret { font-size: 9px; color: #475569; flex-shrink: 0; }
+
+.dc-cam-detail { padding: 6px 8px; background: rgba(0,0,0,0.15); display: flex; flex-direction: column; gap: 6px; }
+.dc-cam-row    { display: flex; align-items: center; gap: 6px; }
+.dc-cam-row--wrap { flex-wrap: wrap; }
+
+.dc-in-scene-label { font-size: 10px; color: #86efac; flex: 1; }
+
+.dc-xywh { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.dc-xywh-row { display: flex; align-items: center; gap: 4px; }
+.dc-xywh-label { font-size: 10px; color: #64748b; width: 14px; flex-shrink: 0; }
+.dc-xywh-input {
+    flex: 1; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 4px; color: #e2e8f0; font-size: 10px; padding: 3px 5px; outline: none;
+}
+.dc-xywh-input:focus { border-color: var(--accent, #a78bfa); }
+.dc-xywh-unit { font-size: 9px; color: #374151; }
+
 .dc-peer-dot {
-    width: 7px; height: 7px; border-radius: 50%;
-    flex-shrink: 0; background: #374151;
+    width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: #374151;
 }
 .dc-peer-dot--connected  { background: #22c55e; }
 .dc-peer-dot--connecting { background: #f59e0b; animation: dcPulse 1.5s ease-in-out infinite; }
 .dc-peer-dot--failed     { background: #ef4444; }
-
-.dc-peer-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dc-peer-slot { font-size: 10px; color: #475569; flex-shrink: 0; }
 </style>
