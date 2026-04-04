@@ -26,6 +26,7 @@ jobs:
           mkdir -p release
           cp dist/index.js release/
           cp plugin.json release/
+          cp -r backend release/
           cd release && zip -r ../plugin.zip .
 
       - name: Create GitHub Release
