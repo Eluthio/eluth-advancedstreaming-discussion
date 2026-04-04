@@ -1,41 +1,34 @@
 <?php
+// Discussion plugin — initial schema
+// Uses hasTable guards so this is safe to run on existing installations.
 
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Database\Schema\Blueprint;
 
 if (! Schema::hasTable('participants_rooms')) {
-    DB::statement("
-        CREATE TABLE `participants_rooms` (
-            `id`             char(36)     NOT NULL,
-            `channel_id`     char(36)     NOT NULL,
-            `plugin_room_id` char(36)     NOT NULL,
-            `host_member_id` varchar(255) NOT NULL,
-            `host_username`  varchar(255) NOT NULL,
-            `status`         varchar(20)  NOT NULL DEFAULT 'open',
-            `created_at`     timestamp    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            `updated_at`     timestamp    NULL,
-            PRIMARY KEY (`id`),
-            KEY `participants_rooms_channel_id_index` (`channel_id`),
-            KEY `participants_rooms_host_member_id_index` (`host_member_id`)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    ");
+    Schema::create('participants_rooms', function (Blueprint $table) {
+        $table->char('id', 36)->primary();
+        $table->char('channel_id', 36)->index();
+        $table->char('plugin_room_id', 36);
+        $table->string('host_member_id')->index();
+        $table->string('host_username');
+        $table->string('status', 20)->default('open');
+        $table->timestamp('created_at')->useCurrent();
+        $table->timestamp('updated_at')->nullable();
+    });
 }
 
 if (! Schema::hasTable('participants_invites')) {
-    DB::statement("
-        CREATE TABLE `participants_invites` (
-            `id`                char(36)     NOT NULL,
-            `room_id`           char(36)     NOT NULL,
-            `channel_id`        char(36)     NOT NULL,
-            `invited_member_id` varchar(255) NOT NULL,
-            `invited_username`  varchar(255) NOT NULL,
-            `host_member_id`    varchar(255) NOT NULL,
-            `host_username`     varchar(255) NOT NULL,
-            `status`            varchar(20)  NOT NULL DEFAULT 'pending',
-            `created_at`        timestamp    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (`id`),
-            UNIQUE KEY `participants_invites_room_member_unique` (`room_id`, `invited_member_id`),
-            KEY `participants_invites_invited_member_id_index` (`invited_member_id`)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    ");
+    Schema::create('participants_invites', function (Blueprint $table) {
+        $table->char('id', 36)->primary();
+        $table->char('room_id', 36)->index();
+        $table->char('channel_id', 36)->index();
+        $table->string('invited_member_id')->index();
+        $table->string('invited_username');
+        $table->string('host_member_id');
+        $table->string('host_username');
+        $table->string('status', 20)->default('pending');
+        $table->timestamp('created_at')->useCurrent();
+        $table->unique(['room_id', 'invited_member_id']);
+    });
 }
