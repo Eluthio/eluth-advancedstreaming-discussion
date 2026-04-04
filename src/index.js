@@ -354,8 +354,16 @@ function listenForSync() {
             case 'create-room': {
                 const { channelId } = msg
                 try {
-                    const { res: r1, data: d1 } = await apiFetch('POST', '/api/plugin-rooms/participants',
+                    let { res: r1, data: d1 } = await apiFetch('POST', '/api/plugin-rooms/participants',
                         { channel_id: channelId })
+
+                    // 409 means a stale room exists — close it and retry once
+                    if (r1.status === 409 && d1.room?.id) {
+                        await apiFetch('POST', `/api/plugin-rooms/participants/${d1.room.id}/close`)
+                        ;({ res: r1, data: d1 } = await apiFetch('POST', '/api/plugin-rooms/participants',
+                            { channel_id: channelId }))
+                    }
+
                     if (!r1.ok) throw new Error(d1.message ?? `HTTP ${r1.status}`)
                     const pluginRoomId = d1.room?.id
                     if (!pluginRoomId) throw new Error('No plugin_room_id from platform')
