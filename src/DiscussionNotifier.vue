@@ -34,7 +34,8 @@ const props = defineProps({
 
 const pendingInvite = ref(null)
 const accepting     = ref(false)
-let pollTimer       = null
+let _pollTimeout    = null
+let _failCount      = 0
 
 function base() { return props.apiBase.replace(/\/$/, '') }
 
@@ -58,9 +59,16 @@ async function api(method, path, body = null) {
 
 async function checkPendingInvites() {
     const data = await api('GET', '/plugins/participants/invites/pending')
-    const invites = data?.invites ?? []
-    // Show the first pending invite; dismiss if none
-    pendingInvite.value = invites[0] ?? null
+    if (data === null) {
+        // Error (network or server) — back off exponentially, capped at 60s
+        _failCount++
+    } else {
+        _failCount = 0
+        pendingInvite.value = (data?.invites ?? [])[0] ?? null
+    }
+    // Schedule next poll: 5s normally, doubles each failure up to 60s max
+    const delay = Math.min(5000 * Math.pow(2, Math.max(0, _failCount - 1)), 60_000)
+    _pollTimeout = setTimeout(checkPendingInvites, delay)
 }
 
 async function acceptInvite() {
@@ -91,11 +99,10 @@ async function declineInvite() {
 
 onMounted(() => {
     checkPendingInvites()
-    pollTimer = setInterval(checkPendingInvites, 5000)
 })
 
 onBeforeUnmount(() => {
-    clearInterval(pollTimer)
+    clearTimeout(_pollTimeout)
 })
 </script>
 

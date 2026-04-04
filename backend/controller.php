@@ -38,24 +38,28 @@ class ParticipantsController
             return response()->json(['error' => 'channel_id and plugin_room_id required'], 422);
         }
 
-        // Close any open rooms this host already has in this channel
-        DB::table('participants_rooms')
-            ->where('channel_id', $channelId)
-            ->where('host_member_id', $member->central_user_id)
-            ->where('status', 'open')
-            ->update(['status' => 'closed', 'updated_at' => now()]);
+        try {
+            // Close any open rooms this host already has in this channel
+            DB::table('participants_rooms')
+                ->where('channel_id', $channelId)
+                ->where('host_member_id', $member->central_user_id)
+                ->where('status', 'open')
+                ->update(['status' => 'closed', 'updated_at' => now()]);
 
-        $id = (string) Str::uuid();
-        DB::table('participants_rooms')->insert([
-            'id'             => $id,
-            'channel_id'     => $channelId,
-            'plugin_room_id' => $pluginRoomId,
-            'host_member_id' => $member->central_user_id,
-            'host_username'  => $member->username,
-            'status'         => 'open',
-            'created_at'     => now(),
-            'updated_at'     => now(),
-        ]);
+            $id = (string) Str::uuid();
+            DB::table('participants_rooms')->insert([
+                'id'             => $id,
+                'channel_id'     => $channelId,
+                'plugin_room_id' => $pluginRoomId,
+                'host_member_id' => $member->central_user_id,
+                'host_username'  => $member->username,
+                'status'         => 'open',
+                'created_at'     => now(),
+                'updated_at'     => now(),
+            ]);
+        } catch (\Throwable) {
+            return response()->json(['message' => 'Discussion plugin tables are not ready — try disabling and re-enabling the plugin.'], 503);
+        }
 
         return response()->json(['room' => ['id' => $id, 'plugin_room_id' => $pluginRoomId]], 201);
     }
@@ -124,20 +128,25 @@ class ParticipantsController
     {
         $member = $this->member($request);
 
-        $invites = DB::table('participants_invites')
-            ->join('participants_rooms', 'participants_invites.room_id', '=', 'participants_rooms.id')
-            ->where('participants_invites.invited_member_id', $member->central_user_id)
-            ->where('participants_invites.status', 'pending')
-            ->where('participants_rooms.status', 'open')
-            ->select(
-                'participants_invites.id',
-                'participants_invites.room_id',
-                'participants_invites.channel_id',
-                'participants_invites.host_member_id',
-                'participants_invites.host_username',
-                'participants_rooms.plugin_room_id'
-            )
-            ->get();
+        try {
+            $invites = DB::table('participants_invites')
+                ->join('participants_rooms', 'participants_invites.room_id', '=', 'participants_rooms.id')
+                ->where('participants_invites.invited_member_id', $member->central_user_id)
+                ->where('participants_invites.status', 'pending')
+                ->where('participants_rooms.status', 'open')
+                ->select(
+                    'participants_invites.id',
+                    'participants_invites.room_id',
+                    'participants_invites.channel_id',
+                    'participants_invites.host_member_id',
+                    'participants_invites.host_username',
+                    'participants_rooms.plugin_room_id'
+                )
+                ->get();
+        } catch (\Throwable) {
+            // Tables may not exist yet (migration pending) — return empty safely
+            $invites = collect();
+        }
 
         return response()->json(['invites' => $invites]);
     }
