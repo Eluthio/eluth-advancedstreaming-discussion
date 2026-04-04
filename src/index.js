@@ -342,7 +342,9 @@ function listenForSync() {
                 },
                 ...(body ? { body: JSON.stringify(body) } : {}),
             })
-            return { res, data: await res.json() }
+            let data = {}
+            try { data = await res.json() } catch { /* non-JSON response (HTML error page etc.) */ }
+            return { res, data }
         }
 
         switch (msg.type) {
