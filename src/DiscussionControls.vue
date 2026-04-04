@@ -114,6 +114,22 @@ export default {
             if (msg.type === 'peers-update') {
                 this.peers = msg.peers ?? []
             }
+            if (msg.type === 'room-created') {
+                this.active   = true
+                this.roomId   = msg.roomId
+                this.starting = false
+            }
+            if (msg.type === 'room-error') {
+                this.error    = msg.error?.includes('409')
+                    ? 'A discussion is already active in this channel.'
+                    : 'Could not start session: ' + msg.error
+                this.starting = false
+            }
+            if (msg.type === 'room-closed') {
+                this.active = false
+                this.roomId = null
+                this.peers  = []
+            }
         }
 
         // Tell main window our channelId and request current state
@@ -132,56 +148,17 @@ export default {
     },
 
     methods: {
-        async api(method, path, body) {
-            const authToken = localStorage.getItem('eluth_token') ?? ''
-            if (!authToken) throw new Error('Not authenticated')
-            const { apiBase } = window.__EluthDiscussionApi ?? {}
-            const b = (apiBase ?? '/api').replace(/\/$/, '')
-            const res = await fetch(`${b}${path}`, {
-                method,
-                headers: {
-                    Authorization: `Bearer ${authToken}`,
-                    ...(body ? { 'Content-Type': 'application/json' } : {}),
-                },
-                ...(body ? { body: JSON.stringify(body) } : {}),
-            })
-            if (!res.ok) throw new Error(`${method} ${path} → ${res.status}`)
-            return res.json()
-        },
-
-        async startSession() {
+        startSession() {
+            if (!this.channelId) return
             this.starting = true
             this.error    = ''
-            try {
-                const data = await this.api('POST', '/api/plugin-rooms/participants', {
-                    channel_id:  this.channelId,
-                    max_players: 8,
-                })
-                const roomId = data.room?.id
-                if (!roomId) throw new Error('No room ID returned')
-                this.active = true
-                this.roomId = roomId
-
-                // Tell main window to start WebRTC session
-                this.bc.postMessage({ type: 'session-started', roomId, channelId: this.channelId })
-            } catch (e) {
-                this.error = e.message.includes('409')
-                    ? 'A discussion is already active in this channel.'
-                    : 'Could not start session: ' + e.message
-            } finally {
-                this.starting = false
-            }
+            // Main window handles the API call (it has the auth token); we just ask it
+            this.bc.postMessage({ type: 'create-room', channelId: this.channelId })
         },
 
-        async endSession() {
+        endSession() {
             if (!this.roomId) return
-            try {
-                await this.api('POST', `/api/plugin-rooms/participants/${this.roomId}/close`)
-            } catch { /* ignore */ }
-            this.bc.postMessage({ type: 'session-ended' })
-            this.active = false
-            this.roomId = null
-            this.peers  = []
+            this.bc.postMessage({ type: 'close-room', roomId: this.roomId })
         },
 
         copyLink() {
@@ -191,19 +168,9 @@ export default {
             setTimeout(() => { this.copied = false }, 2000)
         },
 
-        async shareToChat() {
+        shareToChat() {
             if (!this.canShare) return
-            const authToken = localStorage.getItem('eluth_token') ?? ''
-            if (!authToken) return
-            const { apiBase } = window.__EluthDiscussionApi ?? {}
-            const b = (apiBase ?? '/api').replace(/\/$/, '')
-            try {
-                await fetch(`${b}/api/channels/${this.channelId}/messages`, {
-                    method:  'POST',
-                    headers: { Authorization: `Bearer ${authToken}`, 'Content-Type': 'application/json' },
-                    body:    JSON.stringify({ content: this.joinUrl }),
-                })
-            } catch { /* fallback: copy */ this.copyLink() }
+            this.bc.postMessage({ type: 'share-to-chat', channelId: this.channelId, joinUrl: this.joinUrl })
         },
     },
 }

@@ -90,11 +90,9 @@ const _answered  = new Set()  // memberIds we've already sent an answer to
 
 async function startSession(roomId) {
     const authToken = localStorage.getItem('eluth_token') ?? ''
-    const apiBase = _store.api?.apiBase ?? '/api'
-    const b = apiBase.replace(/\/$/, '')
 
     function apiCall(method, path, body) {
-        return fetch(`${b}${path}`, {
+        return fetch(path, {
             method,
             headers: { Authorization: `Bearer ${authToken}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
             ...(body ? { body: JSON.stringify(body) } : {}),
@@ -230,7 +228,7 @@ function _buildState() {
 // ── BroadcastChannel listener (main window only) ──────────────────────────────
 function listenForSync() {
     _store.syncBc = new BroadcastChannel('eluth-discussion-sync')
-    _store.syncBc.onmessage = (e) => {
+    _store.syncBc.onmessage = async (e) => {
         const msg = e.data
         if (!msg?.type) return
         switch (msg.type) {
@@ -248,6 +246,56 @@ function listenForSync() {
             case 'request-state':
                 _store.syncBc.postMessage({ type: 'state', ..._buildState() })
                 break
+            // Popup asks main window to create a room (popup has no auth token)
+            case 'create-room': {
+                const { channelId } = msg
+                try {
+                    const authToken = localStorage.getItem('eluth_token') ?? ''
+                    const res = await fetch('/api/plugin-rooms/participants', {
+                        method: 'POST',
+                        headers: { Authorization: `Bearer ${authToken}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ channel_id: channelId, max_players: 8 }),
+                    })
+                    const data = await res.json()
+                    if (!res.ok) throw new Error(data.message ?? `HTTP ${res.status}`)
+                    const roomId = data.room?.id
+                    if (!roomId) throw new Error('No room ID returned')
+                    _store.channelId = channelId
+                    ensureCanvas()
+                    startSession(roomId)
+                    _store.syncBc.postMessage({ type: 'room-created', roomId, channelId })
+                } catch (err) {
+                    _store.syncBc.postMessage({ type: 'room-error', error: err.message })
+                }
+                break
+            }
+            // Popup asks main window to post invite link to chat
+            case 'share-to-chat': {
+                const { channelId: cid, joinUrl } = msg
+                try {
+                    const authToken = localStorage.getItem('eluth_token') ?? ''
+                    await fetch(`/api/channels/${cid}/messages`, {
+                        method: 'POST',
+                        headers: { Authorization: `Bearer ${authToken}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ content: joinUrl }),
+                    })
+                } catch { /* ignore */ }
+                break
+            }
+            // Popup asks main window to close a room
+            case 'close-room': {
+                const { roomId } = msg
+                try {
+                    const authToken = localStorage.getItem('eluth_token') ?? ''
+                    await fetch(`/api/plugin-rooms/participants/${roomId}/close`, {
+                        method: 'POST',
+                        headers: { Authorization: `Bearer ${authToken}` },
+                    })
+                } catch { /* ignore */ }
+                endSession()
+                _store.syncBc.postMessage({ type: 'room-closed' })
+                break
+            }
         }
     }
 }
