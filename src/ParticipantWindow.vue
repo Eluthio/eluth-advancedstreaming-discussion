@@ -121,7 +121,9 @@ async function applyDevices() {
     deviceError.value = ''
     try {
         const constraints = {
-            video: selectedVideo.value ? { deviceId: { exact: selectedVideo.value } } : false,
+            video: selectedVideo.value
+                ? { deviceId: { exact: selectedVideo.value }, width: { ideal: 640 }, height: { ideal: 360 } }
+                : false,
             audio: selectedAudio.value ? { deviceId: { exact: selectedAudio.value } } : false,
         }
         if (!constraints.video && !constraints.audio) { localStream.value = null; return }
