@@ -151,8 +151,14 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 
 const props = defineProps({
-    channelId: { type: String, required: true },
+    // Passed by StreamControlPanel; falls back to URL param for compatibility
+    channelId: { type: String, default: '' },
 })
+
+// Resolve channelId from URL if not provided via prop
+const channelId = computed(() =>
+    props.channelId || new URLSearchParams(window.location.search).get('channel') || ''
+)
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const PRESETS = [
@@ -165,7 +171,7 @@ const PRESETS = [
     { label: 'Full',        x: 0,     y: 0,     w: 1,    h: 1    },
 ]
 
-const SETTINGS_KEY = `discussion-settings-${props.channelId}`
+const SETTINGS_KEY = computed(() => `discussion-settings-${channelId.value}`)
 
 // ── State ──────────────────────────────────────────────────────────────────────
 const session        = ref({ active: false, pluginRoomId: null, ourRoomId: null })
@@ -185,14 +191,14 @@ const layout = ref(loadSettings())
 
 function loadSettings() {
     try {
-        const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}')
+        const s = JSON.parse(localStorage.getItem(`discussion-settings-${channelId.value}`) ?? '{}')
         return { align: s.align ?? 'right', maxPer: s.maxPer ?? 3 }
     } catch { return { align: 'right', maxPer: 3 } }
 }
 
 function saveSettings() {
     try {
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+        localStorage.setItem(SETTINGS_KEY.value, JSON.stringify({
             align:  layout.value.align,
             maxPer: layout.value.maxPer,
         }))
@@ -240,7 +246,7 @@ function setupChannels() {
     syncBc = new BroadcastChannel('eluth-discussion-sync')
     syncBc.onmessage = (e) => handleSyncMessage(e.data)
 
-    compositorBc = new BroadcastChannel(`eluth-stream-${props.channelId}`)
+    compositorBc = new BroadcastChannel(`eluth-stream-${channelId.value}`)
     compositorBc.onmessage = (e) => {
         if (e.data?.type === 'state') compositorState.value = e.data
     }
@@ -251,12 +257,12 @@ function handleSyncMessage(msg) {
     switch (msg.type) {
         case 'state':
         case 'peers-update':
-            if (msg.channelId !== props.channelId) return
+            if (msg.channelId !== channelId.value) return
             session.value = { active: msg.active, pluginRoomId: msg.pluginRoomId ?? null, ourRoomId: msg.ourRoomId ?? null }
             peers.value   = msg.peers ?? []
             break
         case 'room-created':
-            if (msg.channelId !== props.channelId) return
+            if (msg.channelId !== channelId.value) return
             starting.value = false
             error.value    = ''
             session.value  = { active: true, pluginRoomId: msg.pluginRoomId, ourRoomId: msg.ourRoomId }
@@ -267,7 +273,7 @@ function handleSyncMessage(msg) {
             error.value    = 'Could not start: ' + (msg.error ?? 'Unknown error')
             break
         case 'room-closed':
-            if (msg.channelId !== props.channelId) return
+            if (msg.channelId !== channelId.value) return
             session.value = { active: false, pluginRoomId: null, ourRoomId: null }
             peers.value   = []
             break
@@ -278,7 +284,7 @@ function handleSyncMessage(msg) {
             inviteState.value = { ...inviteState.value, [msg.memberId]: 'error' }
             break
         case 'members-data':
-            if (msg.channelId !== props.channelId) return
+            if (msg.channelId !== channelId.value) return
             loadingMembers.value = false
             membersLoaded.value  = true
             members.value        = msg.members ?? []
@@ -293,12 +299,12 @@ function handleSyncMessage(msg) {
 function startSession() {
     starting.value = true
     error.value    = ''
-    syncBc.postMessage({ type: 'create-room', channelId: props.channelId })
+    syncBc.postMessage({ type: 'create-room', channelId: channelId.value })
 }
 
 function endSession() {
     syncBc.postMessage({
-        type: 'close-room', channelId: props.channelId,
+        type: 'close-room', channelId: channelId.value,
         pluginRoomId: session.value.pluginRoomId,
         ourRoomId:    session.value.ourRoomId,
     })
@@ -307,7 +313,7 @@ function endSession() {
 function fetchMembers() {
     if (membersLoaded.value || loadingMembers.value) return
     loadingMembers.value = true
-    syncBc.postMessage({ type: 'fetch-members', channelId: props.channelId })
+    syncBc.postMessage({ type: 'fetch-members', channelId: channelId.value })
 }
 
 function inviteMember(member) {
@@ -440,7 +446,7 @@ async function applyLayout() {
 // ── Lifecycle ──────────────────────────────────────────────────────────────────
 onMounted(() => {
     setupChannels()
-    syncBc.postMessage({ type: 'request-state', channelId: props.channelId })
+    syncBc.postMessage({ type: 'request-state', channelId: channelId.value })
 })
 
 onUnmounted(() => {
