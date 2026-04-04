@@ -1,7 +1,7 @@
 {
   "name": "Discussion",
   "slug": "participants",
-  "version": "2.0.7",
+  "version": "2.0.8",
   "min_server_version": "1.5.5",
   "tier": "official",
   "entry": "index.js",
