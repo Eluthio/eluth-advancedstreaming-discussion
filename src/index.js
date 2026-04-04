@@ -4,21 +4,17 @@ import DiscussionNotifier  from './DiscussionNotifier.vue'
 import ParticipantWindow   from './ParticipantWindow.vue'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const SLOT_COUNT = 12
-const SLOT_KEYS  = Array.from({ length: SLOT_COUNT }, (_, i) => `participants-${i + 1}`)
 const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
 
-// ── Slot management ───────────────────────────────────────────────────────────
-// Each slot is a pre-created MediaStream with blank placeholder tracks.
-// When a participant connects, their live tracks are swapped in.
-// The stream object reference never changes → compositor video element auto-updates.
+// ── Per-member slot management ────────────────────────────────────────────────
+// Each member who ever connects gets a persistent MediaStream registered as a
+// source in window.__EluthStreamSources with a stable key: participants-{memberId}
+// The stream object never changes — blank placeholder tracks are swapped for
+// live WebRTC tracks when the member connects, and back when they disconnect.
+// Because the key is stable, the compositor's saved scene layout (which stores
+// sourceKey) persists across sessions automatically.
 
-let _slotsReady = false
-const _slots = {}   // slotKey → { stream, blankVideo, blankAudio, memberId, username, pc, stateCallback }
-
-function slotDefaultLabel(key) {
-    return `Discussion — Seat ${key.split('-')[1]}`
-}
+const _memberSlots = new Map()  // memberId → { stream, blankVideo, blankAudio, pc, stateCallback }
 
 function createBlankVideoTrack() {
     const canvas = document.createElement('canvas')
@@ -28,7 +24,7 @@ function createBlankVideoTrack() {
     ctx.fillStyle = '#0f1117'
     ctx.fillRect(0, 0, 2, 2)
     const track = canvas.captureStream(1).getVideoTracks()[0]
-    track._keepAliveCanvas = canvas   // prevent GC
+    track._keepAlive = canvas   // prevent GC
     return track
 }
 
@@ -40,111 +36,151 @@ function createBlankAudioTrack() {
         gain.gain.value = 0
         gain.connect(dest)
         const track = dest.stream.getAudioTracks()[0]
-        track._keepAliveAc = ac   // prevent GC
+        track._keepAlive = ac
         return track
     } catch {
         return null
     }
 }
 
-function initSlots() {
-    if (_slotsReady) return
-    _slotsReady = true
+// Returns the slotKey for this member, creating the source registration if new.
+function ensureMemberSlot(memberId, username) {
+    const slotKey = `participants-${memberId}`
 
-    for (const key of SLOT_KEYS) {
-        const blankVideo = createBlankVideoTrack()
-        const blankAudio = createBlankAudioTrack()
-        const stream = new MediaStream([blankVideo, blankAudio].filter(Boolean))
-
-        _slots[key] = {
-            stream,
-            blankVideo,
-            blankAudio,
-            memberId:      null,
-            username:      null,
-            pc:            null,
-            stateCallback: null,
+    if (_memberSlots.has(memberId)) {
+        // Update label if username changed
+        const slot = _memberSlots.get(memberId)
+        if (slot.username !== username) {
+            slot.username = username
+            const src = window.__EluthStreamSources?.[slotKey]
+            if (src) src.label = `Discussion \u2014 ${username}\u2019s Webcam`
         }
+        return slotKey
     }
+
+    const blankVideo = createBlankVideoTrack()
+    const blankAudio = createBlankAudioTrack()
+    const stream = new MediaStream([blankVideo, blankAudio].filter(Boolean))
+
+    _memberSlots.set(memberId, {
+        stream,
+        blankVideo,
+        blankAudio,
+        username,
+        pc:            null,
+        stateCallback: null,
+    })
+
+    // Dynamically register a new compositor source for this member
+    window.__EluthStreamSources = window.__EluthStreamSources || {}
+    window.__EluthStreamSources[slotKey] = {
+        label: `Discussion \u2014 ${username}\u2019s Webcam`,
+        icon:  '👥',
+        slug:  'participants',
+
+        setStateCallback(cb) {
+            const s = _memberSlots.get(memberId)
+            if (s) s.stateCallback = cb
+        },
+
+        async getStream() {
+            return _memberSlots.get(memberId)?.stream ?? new MediaStream()
+        },
+
+        getState() {
+            const s = _memberSlots.get(memberId)
+            return { connected: !!s?.pc, username: s?.username ?? username }
+        },
+
+        handleMessage(_msg) {},
+    }
+
+    return slotKey
 }
 
-function findFreeSlot() {
-    return SLOT_KEYS.find(k => !_slots[k]?.memberId) ?? null
-}
-
-function slotForMember(memberId) {
-    return SLOT_KEYS.find(k => _slots[k]?.memberId === memberId) ?? null
-}
-
-function assignSlot(slotKey, memberId, username) {
-    const slot = _slots[slotKey]
-    slot.memberId = memberId
-    slot.username = username
-    const src = window.__EluthStreamSources?.[slotKey]
-    if (src) src.label = `Discussion \u2014 ${username}\u2019s Webcam`
-    slot.stateCallback?.({ occupied: true, memberId, username })
-}
-
-function releaseSlot(slotKey) {
-    const slot = _slots[slotKey]
+function disconnectMemberSlot(memberId) {
+    const slot = _memberSlots.get(memberId)
     if (!slot) return
 
-    // Close peer connection
     slot.pc?.close()
     slot.pc = null
 
-    // Restore blank tracks
+    // Restore blank placeholder tracks — keep source registered for next session
     for (const t of slot.stream.getTracks()) slot.stream.removeTrack(t)
     if (slot.blankVideo) slot.stream.addTrack(slot.blankVideo)
     if (slot.blankAudio) slot.stream.addTrack(slot.blankAudio)
 
-    slot.memberId = null
-    slot.username = null
-
-    const src = window.__EluthStreamSources?.[slotKey]
-    if (src) src.label = slotDefaultLabel(slotKey)
-    slot.stateCallback?.({ occupied: false, memberId: null, username: null })
+    slot.stateCallback?.({ connected: false, username: slot.username })
 }
 
-// Register all 12 slot sources immediately so they appear in the compositor
-// source picker. Actual stream objects are created lazily by initSlots().
+// ── Base "Discussion" source ───────────────────────────────────────────────────
+// Registered immediately so it appears in the source picker.
+// Adding this source to a scene reveals the plugin control panel (DiscussionControls).
+// Individual participant webcam sources appear dynamically as people connect.
+
 window.__EluthStreamSources = window.__EluthStreamSources || {}
-for (const key of SLOT_KEYS) {
-    ;(function register(k) {
-        window.__EluthStreamSources[k] = {
-            label: slotDefaultLabel(k),
-            icon:  '👥',
-            slug:  'participants',
+window.__EluthStreamSources['participants'] = {
+    label: 'Discussion',
+    icon:  '👥',
+    slug:  'participants',
 
-            setStateCallback(cb) {
-                initSlots()
-                _slots[k].stateCallback = cb
-            },
+    setStateCallback(cb) { _store.stateCallback = cb },
 
-            async getStream() {
-                initSlots()
-                return _slots[k].stream
-            },
+    async getStream() {
+        // Returns a minimal info canvas — updated as session state changes
+        ensureInfoCanvas()
+        return _store.infoStream
+    },
 
-            getState() {
-                const slot = _slots[k]
-                if (!slot) return { occupied: false }
-                return { occupied: !!slot.memberId, memberId: slot.memberId, username: slot.username }
-            },
-
-            handleMessage(_msg) {},
+    getState() {
+        return {
+            active: !!_sessions.size,
+            connected: [..._memberSlots.values()].filter(s => !!s.pc).length,
         }
-    })(key)
+    },
+
+    handleMessage(_msg) {},
+}
+
+// ── Info canvas (base source visual) ─────────────────────────────────────────
+// Small canvas showing session status, drawn into the base "Discussion" source.
+
+const _store = {
+    stateCallback: null,
+    infoCanvas:    null,
+    infoCtx:       null,
+    infoStream:    null,
+}
+
+function ensureInfoCanvas() {
+    if (_store.infoCanvas) return
+    const c   = document.createElement('canvas')
+    c.width   = 320
+    c.height  = 180
+    const ctx = c.getContext('2d')
+    _store.infoCanvas = c
+    _store.infoCtx    = ctx
+    _store.infoStream = c.captureStream(2)
+    drawInfoCanvas()
+}
+
+function drawInfoCanvas() {
+    const ctx = _store.infoCtx
+    if (!ctx) return
+    const active = [..._sessions.values()]
+    const count  = [..._memberSlots.values()].filter(s => !!s.pc).length
+    ctx.fillStyle = '#0f1117'
+    ctx.fillRect(0, 0, 320, 180)
+    ctx.fillStyle = 'rgba(255,255,255,0.15)'
+    ctx.font      = 'bold 18px sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(active.length ? `Discussion \u2022 ${count} connected` : 'Discussion', 160, 90)
 }
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
-// Multiple channels can have concurrent discussions, each session keyed by channelId.
 
-const _sessions = new Map()  // channelId → session object
-
-function getSession(channelId) {
-    return _sessions.get(channelId) ?? null
-}
+const _sessions = new Map()  // channelId → session
 
 function buildSessionState(channelId) {
     const session = _sessions.get(channelId)
@@ -153,31 +189,24 @@ function buildSessionState(channelId) {
         active:       !!session,
         pluginRoomId: session?.pluginRoomId ?? null,
         ourRoomId:    session?.ourRoomId    ?? null,
-        peers:        session?.peers.map(({ memberId, username, slotKey, state }) =>
-                          ({ memberId, username, slotKey, state })) ?? [],
+        peers: session?.peers.map(({ memberId, username, slotKey, state }) =>
+            ({ memberId, username, slotKey, state })) ?? [],
     }
 }
 
 async function startSession(channelId, pluginRoomId, ourRoomId) {
     await stopSession(channelId)
 
-    const session = {
-        channelId,
-        pluginRoomId,
-        ourRoomId,
-        answered: new Set(),
-        peers:    [],
-        pollTimer: null,
-    }
+    const session = { channelId, pluginRoomId, ourRoomId, answered: new Set(), peers: [], pollTimer: null }
     _sessions.set(channelId, session)
 
-    const authToken = () => localStorage.getItem('eluth_token') ?? ''
+    const token = () => localStorage.getItem('eluth_token') ?? ''
 
     function apiFetch(method, path, body) {
         return fetch(path, {
             method,
             headers: {
-                Authorization: `Bearer ${authToken()}`,
+                Authorization: `Bearer ${token()}`,
                 ...(body ? { 'Content-Type': 'application/json' } : {}),
             },
             ...(body ? { body: JSON.stringify(body) } : {}),
@@ -191,7 +220,6 @@ async function startSession(channelId, pluginRoomId, ourRoomId) {
             data = res.room?.data ?? {}
         } catch { return }
 
-        // Handle new offers
         for (const [key, offerSdp] of Object.entries(data)) {
             if (!key.endsWith('_offer') || typeof offerSdp !== 'string') continue
             const memberId = key.slice(0, -6)
@@ -201,60 +229,49 @@ async function startSession(channelId, pluginRoomId, ourRoomId) {
             connectPeer(session, memberId, username, offerSdp, pluginRoomId, apiFetch)
         }
 
-        // Handle disconnections
         for (const peer of session.peers.slice()) {
-            if (data[`${peer.memberId}_status`] === 'disconnected') {
-                removePeer(session, peer.memberId)
-            }
+            if (data[`${peer.memberId}_status`] === 'disconnected') removePeer(session, peer.memberId)
         }
 
+        drawInfoCanvas()
         _syncBc?.postMessage({ type: 'peers-update', ...buildSessionState(channelId) })
     }, 2000)
-
-    return session
 }
 
 async function stopSession(channelId) {
     const session = _sessions.get(channelId)
     if (!session) return
     clearInterval(session.pollTimer)
-    for (const peer of session.peers) releaseSlot(peer.slotKey)
+    for (const peer of session.peers) disconnectMemberSlot(peer.memberId)
     _sessions.delete(channelId)
+    drawInfoCanvas()
     _syncBc?.postMessage({ type: 'room-closed', channelId, active: false, peers: [] })
 }
 
 // ── WebRTC host side ──────────────────────────────────────────────────────────
 
 async function connectPeer(session, memberId, username, offerSdp, pluginRoomId, apiFetch) {
-    initSlots()
-    const slotKey = findFreeSlot()
-    if (!slotKey) {
-        console.warn('[Discussion] No free slots for', username)
-        return
-    }
-
-    const slot = _slots[slotKey]
-    const pc   = new RTCPeerConnection(RTC_CONFIG)
-    slot.pc    = pc
+    const slotKey = ensureMemberSlot(memberId, username)
+    const slot    = _memberSlots.get(memberId)
+    const pc      = new RTCPeerConnection(RTC_CONFIG)
+    slot.pc       = pc
 
     const peer = { memberId, username, slotKey, state: 'connecting' }
     session.peers.push(peer)
-    assignSlot(slotKey, memberId, username)
     _syncBc?.postMessage({ type: 'peers-update', ...buildSessionState(session.channelId) })
 
     pc.onconnectionstatechange = () => {
         const cs = pc.connectionState
-        peer.state = cs === 'connected' ? 'connected'
+        peer.state = cs === 'connected'   ? 'connected'
             : (cs === 'failed' || cs === 'disconnected' || cs === 'closed') ? 'failed'
             : 'connecting'
-        slot.stateCallback?.({ occupied: true, memberId, username, state: peer.state })
+        slot.stateCallback?.({ connected: peer.state === 'connected', username })
         _syncBc?.postMessage({ type: 'peers-update', ...buildSessionState(session.channelId) })
         if (peer.state === 'failed') removePeer(session, memberId)
     }
 
     pc.ontrack = (e) => {
         const track = e.track
-        // Swap incoming track into the slot's persistent MediaStream
         if (track.kind === 'video') {
             slot.stream.getVideoTracks().forEach(t => slot.stream.removeTrack(t))
             slot.stream.addTrack(track)
@@ -262,7 +279,7 @@ async function connectPeer(session, memberId, username, offerSdp, pluginRoomId, 
             slot.stream.getAudioTracks().forEach(t => slot.stream.removeTrack(t))
             slot.stream.addTrack(track)
         }
-        slot.stateCallback?.({ occupied: true, memberId, username })
+        slot.stateCallback?.({ connected: true, username })
     }
 
     try {
@@ -284,7 +301,7 @@ function removePeer(session, memberId) {
     const idx = session.peers.findIndex(p => p.memberId === memberId)
     if (idx === -1) return
     const peer = session.peers[idx]
-    releaseSlot(peer.slotKey)
+    disconnectMemberSlot(peer.memberId)
     session.peers.splice(idx, 1)
     session.answered.delete(memberId)
     _syncBc?.postMessage({ type: 'peers-update', ...buildSessionState(session.channelId) })
@@ -304,7 +321,7 @@ function waitForIce(pc) {
     })
 }
 
-// ── BroadcastChannel relay (main window only) ─────────────────────────────────
+// ── BroadcastChannel relay (main window) ──────────────────────────────────────
 
 let _syncBc = null
 
@@ -330,24 +347,20 @@ function listenForSync() {
 
         switch (msg.type) {
 
-            // ── Create room ─────────────────────────────────────────────────
             case 'create-room': {
                 const { channelId } = msg
                 try {
-                    // 1. Create platform plugin-room (handles WebRTC signalling data)
                     const { res: r1, data: d1 } = await apiFetch('POST', '/api/plugin-rooms/participants',
                         { channel_id: channelId, max_players: 12 })
                     if (!r1.ok) throw new Error(d1.message ?? `HTTP ${r1.status}`)
                     const pluginRoomId = d1.room?.id
                     if (!pluginRoomId) throw new Error('No plugin_room_id from platform')
 
-                    // 2. Create discussion room (tracks invites)
                     const { res: r2, data: d2 } = await apiFetch('POST', '/api/plugins/participants/rooms',
                         { channel_id: channelId, plugin_room_id: pluginRoomId })
                     if (!r2.ok) throw new Error(d2.error ?? `HTTP ${r2.status}`)
                     const ourRoomId = d2.room?.id
 
-                    initSlots()
                     await startSession(channelId, pluginRoomId, ourRoomId)
                     _syncBc.postMessage({ type: 'room-created', channelId, pluginRoomId, ourRoomId })
                 } catch (err) {
@@ -356,28 +369,22 @@ function listenForSync() {
                 break
             }
 
-            // ── Close room ──────────────────────────────────────────────────
             case 'close-room': {
                 const { channelId, pluginRoomId, ourRoomId } = msg
-                // Close platform room
                 if (pluginRoomId) {
                     fetch(`/api/plugin-rooms/participants/${pluginRoomId}/close`, {
-                        method: 'POST',
-                        headers: { Authorization: `Bearer ${token()}` },
+                        method: 'POST', headers: { Authorization: `Bearer ${token()}` },
                     }).catch(() => {})
                 }
-                // Close discussion room
                 if (ourRoomId) {
                     fetch(`/api/plugins/participants/rooms/${ourRoomId}`, {
-                        method: 'DELETE',
-                        headers: { Authorization: `Bearer ${token()}` },
+                        method: 'DELETE', headers: { Authorization: `Bearer ${token()}` },
                     }).catch(() => {})
                 }
                 await stopSession(channelId)
                 break
             }
 
-            // ── Invite a specific member ────────────────────────────────────
             case 'invite-member': {
                 const { ourRoomId, memberId, username } = msg
                 try {
@@ -392,19 +399,17 @@ function listenForSync() {
                 break
             }
 
-            // ── Fetch channel members for the picker ────────────────────────
             case 'fetch-members': {
                 const { channelId } = msg
                 try {
                     const { data } = await apiFetch('GET', `/api/members?channel_id=${channelId}`)
                     _syncBc.postMessage({ type: 'members-data', channelId, members: data.members ?? data ?? [] })
-                } catch (err) {
-                    _syncBc.postMessage({ type: 'members-error', error: err.message })
+                } catch {
+                    _syncBc.postMessage({ type: 'members-error' })
                 }
                 break
             }
 
-            // ── State request from popup ────────────────────────────────────
             case 'request-state': {
                 const { channelId } = msg
                 _syncBc.postMessage({ type: 'state', ...buildSessionState(channelId) })
@@ -425,8 +430,8 @@ window.__EluthPlugins['participants'] = {
     component: DiscussionNotifier,
 
     async bootstrap(api) {
-        const params      = new URLSearchParams(window.location.search)
-        const joinRoomId  = params.get('participants_join')
+        const params     = new URLSearchParams(window.location.search)
+        const joinRoomId = params.get('participants_join')
 
         // ── Participant join popup ──────────────────────────────────────────
         if (joinRoomId) {
@@ -442,11 +447,10 @@ window.__EluthPlugins['participants'] = {
             return
         }
 
-        // ── Streaming control popup — sources are already registered ───────
+        // ── Streaming control popup — base source already registered ────────
         if (params.get('popup') === 'stream-control') return
 
-        // ── Main window — start session management listener ─────────────────
-        initSlots()
+        // ── Main window ─────────────────────────────────────────────────────
         listenForSync()
     },
 
@@ -456,27 +460,20 @@ window.__EluthPlugins['participants'] = {
             label: '👥 Invite to Discussion',
             when: ({ isSelf }) => !isSelf,
             action({ channelId, memberId, author }) {
-                // Find the active session for this channel
                 const session = _sessions.get(channelId)
                 if (!session) {
                     alert('Start a Discussion session first — open the streaming controls.')
                     return
                 }
-                // Send invite via BC relay through main window
                 const bc = new BroadcastChannel('eluth-discussion-sync')
-                bc.postMessage({
-                    type:      'invite-member',
-                    ourRoomId: session.ourRoomId,
-                    memberId,
-                    username:  author ?? '',
-                })
+                bc.postMessage({ type: 'invite-member', ourRoomId: session.ourRoomId, memberId, username: author ?? '' })
                 bc.close()
             },
         },
     ],
 }
 
-// Global styles
+// ── Global styles ─────────────────────────────────────────────────────────────
 const style = document.createElement('style')
 style.textContent = `
 #pd-join-root {
