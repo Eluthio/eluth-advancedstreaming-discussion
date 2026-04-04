@@ -89,7 +89,8 @@ const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
 const _answered  = new Set()  // memberIds we've already sent an answer to
 
 async function startSession(roomId) {
-    const { authToken, apiBase } = _store.api
+    const authToken = localStorage.getItem('eluth_token') ?? ''
+    const apiBase = _store.api?.apiBase ?? '/api'
     const b = apiBase.replace(/\/$/, '')
 
     function apiCall(method, path, body) {
@@ -299,8 +300,8 @@ window.__EluthPlugins['participants'] = {
             document.body.appendChild(div)
             createApp(ParticipantWindow, {
                 roomId:    joinRoomId,
-                authToken: api.authToken,
-                apiBase:   api.apiBase,
+                authToken: localStorage.getItem('eluth_token') ?? '',
+                apiBase:   api.apiBase ?? '/api',
             }).mount(div)
             return
         }

@@ -133,9 +133,10 @@ export default {
 
     methods: {
         async api(method, path, body) {
-            const { authToken, apiBase } = window.__EluthDiscussionApi ?? {}
+            const authToken = localStorage.getItem('eluth_token') ?? ''
             if (!authToken) throw new Error('Not authenticated')
-            const b = apiBase.replace(/\/$/, '')
+            const { apiBase } = window.__EluthDiscussionApi ?? {}
+            const b = (apiBase ?? '/api').replace(/\/$/, '')
             const res = await fetch(`${b}${path}`, {
                 method,
                 headers: {
@@ -192,9 +193,10 @@ export default {
 
         async shareToChat() {
             if (!this.canShare) return
-            const { authToken, apiBase } = window.__EluthDiscussionApi ?? {}
+            const authToken = localStorage.getItem('eluth_token') ?? ''
             if (!authToken) return
-            const b = apiBase.replace(/\/$/, '')
+            const { apiBase } = window.__EluthDiscussionApi ?? {}
+            const b = (apiBase ?? '/api').replace(/\/$/, '')
             try {
                 await fetch(`${b}/api/channels/${this.channelId}/messages`, {
                     method:  'POST',
