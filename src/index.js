@@ -335,7 +335,10 @@ async function connectPeer(session, memberId, username, offerSdp, pluginRoomId, 
     }
 
     try {
-        await pc.setRemoteDescription({ type: 'offer', sdp: sanitizeSdp(offerSdp) })
+        const _sanitized = sanitizeSdp(offerSdp)
+        // Debug: log lines mentioning payload types 49 or 50 so we can see what they are
+        console.log('[Discussion] SDP lines with pt 49/50:', offerSdp.replace(/\r\n/g,'\n').split('\n').filter(l => /\b(49|50)\b/.test(l)))
+        await pc.setRemoteDescription({ type: 'offer', sdp: _sanitized })
         const answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         await waitForIce(pc)
