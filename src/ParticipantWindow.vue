@@ -81,11 +81,11 @@ let pc = null
 
 const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
 
-// Strip a=ssrc lines with two-token msid values — some browsers generate them,
-// others reject them as invalid. Redundant in Unified Plan anyway.
+// Strip all a=ssrc and a=ssrc-group lines — redundant in Unified Plan and
+// rejected inconsistently across Brave's normal vs incognito privacy modes.
 function sanitizeSdp(sdp) {
     return sdp.split('\r\n')
-        .filter(line => !/^a=ssrc:\d+ msid:/.test(line))
+        .filter(line => !/^a=ssrc[-:]/.test(line))
         .join('\r\n')
 }
 

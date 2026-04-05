@@ -251,14 +251,15 @@ async function stopSession(channelId) {
 
 // ── WebRTC utilities ──────────────────────────────────────────────────────────
 
-// Strip a=ssrc lines that carry a two-token msid value (stream-id + track-id).
-// Brave/Chrome incognito generates these; non-incognito Brave rejects them as
-// invalid because strict SDP parsers expect a single token after "msid:".
-// These lines are redundant in Unified Plan — a=msid: at the m-section level
-// already provides the same stream/track binding.
+// Strip all a=ssrc and a=ssrc-group lines from an SDP string.
+// In Unified Plan (used by all modern Chromium builds), these lines are
+// entirely optional — stream/track binding is handled by the m-section's
+// own a=msid: line. Different Brave privacy modes generate or reject specific
+// a=ssrc attribute formats inconsistently, so removing them all is the
+// safest cross-mode fix.
 function sanitizeSdp(sdp) {
     return sdp.split('\r\n')
-        .filter(line => !/^a=ssrc:\d+ msid:/.test(line))
+        .filter(line => !/^a=ssrc[-:]/.test(line))
         .join('\r\n')
 }
 
