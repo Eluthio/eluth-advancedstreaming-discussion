@@ -278,7 +278,9 @@ function sanitizeSdp(sdp) {
     //    cross-browser SDP parse failures even when listed as "supported".
     //  • If getCapabilities() is available, also remove any codec the local
     //    peer doesn't support (e.g. H.265 on builds without HEVC WebRTC).
-    const FEC = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03)\//
+    // H265 is also force-stripped: Brave/Chrome advertise it via getCapabilities
+    // but fail to parse H265 SDP lines in setRemoteDescription on many platforms.
+    const FEC = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//
     const badPt = new Set()
     for (const l of lines) {
         const m = l.match(/^a=rtpmap:(\d+) ([^/]+)\//)

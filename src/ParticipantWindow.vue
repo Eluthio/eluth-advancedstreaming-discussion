@@ -97,7 +97,7 @@ function sanitizeSdp(sdp) {
         }
     } catch { /* API unavailable */ }
 
-    const FEC = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03)\//
+    const FEC = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//
     const badPt = new Set()
     for (const l of lines) {
         const m = l.match(/^a=rtpmap:(\d+) ([^/]+)\//)
