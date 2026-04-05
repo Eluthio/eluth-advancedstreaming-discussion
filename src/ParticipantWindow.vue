@@ -87,7 +87,7 @@ function sanitizeSdp(sdp) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
     const badPt = new Set()
     for (const l of lines) {
-        const m = l.match(/^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03)\//)
+        const m = l.match(/^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//)
         if (m) badPt.add(m[1])
     }
     let grew = true
