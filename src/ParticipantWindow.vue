@@ -81,14 +81,26 @@ let pc = null
 
 const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
 
-// Strip all a=ssrc and a=ssrc-group lines — redundant in Unified Plan and
-// rejected inconsistently across Brave's normal vs incognito privacy modes.
+// Strip a=ssrc lines (cross-browser incompatibility) and any codecs the local
+// browser doesn't support, using RTCRtpReceiver.getCapabilities() where available.
 function sanitizeSdp(sdp) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+
+    let localSupported = null
+    try {
+        const caps = RTCRtpReceiver.getCapabilities?.('video')
+        if (caps) localSupported = new Set(caps.codecs.map(c => c.mimeType.split('/')[1].toUpperCase()))
+    } catch { /* API unavailable */ }
+
+    const FEC = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03)\//
     const badPt = new Set()
     for (const l of lines) {
-        const m = l.match(/^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//)
-        if (m) badPt.add(m[1])
+        const m = l.match(/^a=rtpmap:(\d+) ([^/]+)\//)
+        if (!m) continue
+        const [, pt, name] = m
+        const upper = name.toUpperCase()
+        if (FEC.test(l)) { badPt.add(pt); continue }
+        if (localSupported && upper !== 'RTX' && !localSupported.has(upper)) badPt.add(pt)
     }
     let grew = true
     while (grew) {

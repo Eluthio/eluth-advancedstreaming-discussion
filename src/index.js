@@ -260,16 +260,31 @@ async function stopSession(channelId) {
 function sanitizeSdp(sdp) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
 
-    // Some Brave builds reject FEC-related codec lines in offers from Brave
-    // incognito. Seed the bad-payload set with known FEC codec names, then
-    // chase RTX chains to a fixpoint — removing an RTX payload type may leave
-    // a further RTX-of-RTX entry that also references a now-removed type.
+    // Ask this browser what video codecs it can actually receive.
+    // RTX is a retransmission helper — we handle it separately via apt= chains.
+    let localSupported = null
+    try {
+        const caps = RTCRtpReceiver.getCapabilities?.('video')
+        if (caps) localSupported = new Set(caps.codecs.map(c => c.mimeType.split('/')[1].toUpperCase()))
+    } catch { /* API unavailable */ }
+
+    // Build the set of payload types to remove:
+    //  • Always remove FEC codecs (ulpfec, red, flexfec-03) — they cause
+    //    cross-browser SDP parse failures even when listed as "supported".
+    //  • If getCapabilities() is available, also remove any codec the local
+    //    peer doesn't support (e.g. H.265 on builds without HEVC WebRTC).
+    const FEC = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03)\//
     const badPt = new Set()
     for (const l of lines) {
-        const m = l.match(/^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//)
-        if (m) badPt.add(m[1])
+        const m = l.match(/^a=rtpmap:(\d+) ([^/]+)\//)
+        if (!m) continue
+        const [, pt, name] = m
+        const upper = name.toUpperCase()
+        if (FEC.test(l)) { badPt.add(pt); continue }
+        if (localSupported && upper !== 'RTX' && !localSupported.has(upper)) badPt.add(pt)
     }
-    // Fixpoint: keep adding RTX payload types whose apt= target was just removed
+    // Fixpoint: chase RTX chains — an RTX whose apt= target is removed must
+    // also be removed, and this may cascade multiple levels.
     let grew = true
     while (grew) {
         grew = false
