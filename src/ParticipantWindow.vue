@@ -84,7 +84,8 @@ const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
 // Strip all a=ssrc and a=ssrc-group lines — redundant in Unified Plan and
 // rejected inconsistently across Brave's normal vs incognito privacy modes.
 function sanitizeSdp(sdp) {
-    return sdp.split('\r\n')
+    const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+    return lines
         .filter(line => !/^a=ssrc[-:]/.test(line))
         .join('\r\n')
 }

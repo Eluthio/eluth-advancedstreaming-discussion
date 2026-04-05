@@ -258,7 +258,11 @@ async function stopSession(channelId) {
 // a=ssrc attribute formats inconsistently, so removing them all is the
 // safest cross-mode fix.
 function sanitizeSdp(sdp) {
-    return sdp.split('\r\n')
+    // Normalise to \r\n first — the DB round-trip may strip \r, leaving \n only.
+    // Splitting by '\r\n' on a \n-only string returns a single element and the
+    // filter never runs, so lines that should be removed stay in.
+    const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+    return lines
         .filter(line => !/^a=ssrc[-:]/.test(line))
         .join('\r\n')
 }
@@ -298,7 +302,9 @@ async function connectPeer(session, memberId, username, offerSdp, pluginRoomId, 
     }
 
     try {
-        await pc.setRemoteDescription({ type: 'offer', sdp: sanitizeSdp(offerSdp) })
+        const cleanOffer = sanitizeSdp(offerSdp)
+        console.log('[Discussion] offer SDP being set (first 600 chars, JSON-escaped):', JSON.stringify(cleanOffer.substring(0, 600)))
+        await pc.setRemoteDescription({ type: 'offer', sdp: cleanOffer })
         const answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         await waitForIce(pc)
