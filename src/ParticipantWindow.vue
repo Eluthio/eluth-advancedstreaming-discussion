@@ -95,7 +95,11 @@ async function api(method, path, body) {
         headers: { Authorization: `Bearer ${props.authToken}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
         ...(body ? { body: JSON.stringify(body) } : {}),
     })
-    if (!res.ok) throw new Error(`${method} ${path} → ${res.status}`)
+    if (!res.ok) {
+        const err = new Error(`${method} ${path} → ${res.status}`)
+        err.status = res.status
+        throw err
+    }
     return res.json()
 }
 
@@ -191,7 +195,9 @@ async function joinSession() {
 
     } catch (e) {
         console.error('[Discussion] join failed', e)
-        joinError.value = 'Failed to connect: ' + e.message
+        joinError.value = e.status === 404
+            ? 'This session is no longer active — ask the host to re-invite you.'
+            : 'Failed to connect: ' + e.message
         phase.value = 'failed'
         pc?.close()
         pc = null

@@ -39,12 +39,18 @@ class ParticipantsController
         }
 
         try {
-            // Close any open rooms this host already has in this channel
-            DB::table('participants_rooms')
+            // Collect IDs of rooms being closed so we can migrate their pending invites
+            $closingIds = DB::table('participants_rooms')
                 ->where('channel_id', $channelId)
                 ->where('host_member_id', $member->central_user_id)
                 ->where('status', 'open')
-                ->update(['status' => 'closed', 'updated_at' => now()]);
+                ->pluck('id');
+
+            if ($closingIds->isNotEmpty()) {
+                DB::table('participants_rooms')
+                    ->whereIn('id', $closingIds)
+                    ->update(['status' => 'closed', 'updated_at' => now()]);
+            }
 
             $id = (string) Str::uuid();
             DB::table('participants_rooms')->insert([
@@ -57,6 +63,15 @@ class ParticipantsController
                 'created_at'     => now(),
                 'updated_at'     => now(),
             ]);
+
+            // Migrate pending invites from closed rooms → new room so guests
+            // who haven't accepted yet still get a valid (live) plugin_room_id
+            if ($closingIds->isNotEmpty()) {
+                DB::table('participants_invites')
+                    ->whereIn('room_id', $closingIds)
+                    ->where('status', 'pending')
+                    ->update(['room_id' => $id]);
+            }
         } catch (\Throwable) {
             return response()->json(['message' => 'Discussion plugin tables are not ready — try disabling and re-enabling the plugin.'], 503);
         }
