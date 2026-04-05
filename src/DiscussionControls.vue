@@ -150,15 +150,9 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 
-const props = defineProps({
-    // Passed by StreamControlPanel; falls back to URL param for compatibility
-    channelId: { type: String, default: '' },
-})
-
-// Resolve channelId from URL if not provided via prop
-const channelId = computed(() =>
-    props.channelId || new URLSearchParams(window.location.search).get('channel') || ''
-)
+// ── Popup context ──────────────────────────────────────────────────────────────
+const _popup    = window.__eluthPopup
+const channelId = _popup?.getChannelId() ?? new URLSearchParams(window.location.search).get('channel') ?? ''
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const PRESETS = [
@@ -171,7 +165,8 @@ const PRESETS = [
     { label: 'Full',        x: 0,     y: 0,     w: 1,    h: 1    },
 ]
 
-const SETTINGS_KEY = computed(() => `discussion-settings-${channelId.value}`)
+const SETTINGS_KEY = `discussion-settings-${channelId}`
+const RTC_CONFIG   = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
 
 // ── State ──────────────────────────────────────────────────────────────────────
 const session        = ref({ active: false, pluginRoomId: null, ourRoomId: null })
@@ -189,16 +184,22 @@ const expandedPeer   = ref(null)
 const compositorState = ref(null)
 const layout = ref(loadSettings())
 
+// Internal WebRTC state — not reactive, managed imperatively
+const _pcs     = new Map()   // memberId → RTCPeerConnection
+const _answered = new Set()  // memberIds already answered this session
+let   _pollTimer = null
+
+// ── Settings persistence ───────────────────────────────────────────────────────
 function loadSettings() {
     try {
-        const s = JSON.parse(localStorage.getItem(`discussion-settings-${channelId.value}`) ?? '{}')
+        const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}')
         return { align: s.align ?? 'right', maxPer: s.maxPer ?? 3 }
     } catch { return { align: 'right', maxPer: 3 } }
 }
 
 function saveSettings() {
     try {
-        localStorage.setItem(SETTINGS_KEY.value, JSON.stringify({
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify({
             align:  layout.value.align,
             maxPer: layout.value.maxPer,
         }))
@@ -238,99 +239,282 @@ function peerTransform(peer) {
 
 function round4(n) { return Math.round((n ?? 0) * 10000) / 10000 }
 
-// ── BroadcastChannels ──────────────────────────────────────────────────────────
-let syncBc          = null
-let compositorBc    = null
-let stateRefreshTimer = null
-
-function setupChannels() {
-    syncBc = new BroadcastChannel('eluth-discussion-sync')
-    syncBc.onmessage = (e) => handleSyncMessage(e.data)
-
-    compositorBc = new BroadcastChannel(`eluth-stream-${channelId.value}`)
-    compositorBc.onmessage = (e) => {
-        if (e.data?.type === 'state') compositorState.value = e.data
-    }
-}
-
-function handleSyncMessage(msg) {
-    if (!msg?.type) return
-    switch (msg.type) {
-        case 'state':
-        case 'peers-update':
-            if (msg.channelId !== channelId.value) return
-            session.value = { active: msg.active, pluginRoomId: msg.pluginRoomId ?? null, ourRoomId: msg.ourRoomId ?? null }
-            peers.value   = msg.peers ?? []
-            break
-        case 'room-created':
-            if (msg.channelId !== channelId.value) return
-            starting.value = false
-            error.value    = ''
-            session.value  = { active: true, pluginRoomId: msg.pluginRoomId, ourRoomId: msg.ourRoomId }
-            fetchMembers()
-            break
-        case 'room-error':
-            starting.value = false
-            error.value    = 'Could not start: ' + (msg.error ?? 'Unknown error')
-            break
-        case 'room-closed':
-            if (msg.channelId !== channelId.value) return
-            session.value = { active: false, pluginRoomId: null, ourRoomId: null }
-            peers.value   = []
-            break
-        case 'leader-reset':
-            // A new relay leader has taken over (e.g. after a page refresh) — it has
-            // no active sessions, so reset our local state to match.
-            session.value = { active: false, pluginRoomId: null, ourRoomId: null }
-            peers.value   = []
-            break
-        case 'invite-sent':
-            inviteState.value = { ...inviteState.value, [msg.memberId]: 'sent' }
-            break
-        case 'invite-error':
-            inviteState.value = { ...inviteState.value, [msg.memberId]: 'error' }
-            break
-        case 'members-data':
-            if (msg.channelId !== channelId.value) return
-            loadingMembers.value = false
-            membersLoaded.value  = true
-            members.value        = msg.members ?? []
-            break
-        case 'members-error':
-            loadingMembers.value = false
-            break
-    }
-}
-
-// ── Session actions ────────────────────────────────────────────────────────────
-function startSession() {
-    starting.value = true
-    error.value    = ''
-    syncBc.postMessage({ type: 'create-room', channelId: channelId.value })
-}
-
-function endSession() {
-    syncBc.postMessage({
-        type: 'close-room', channelId: channelId.value,
-        pluginRoomId: session.value.pluginRoomId,
-        ourRoomId:    session.value.ourRoomId,
+// ── API helper ─────────────────────────────────────────────────────────────────
+function apiFetch(method, path, body) {
+    return fetch(path, {
+        method,
+        headers: {
+            Authorization: `Bearer ${_popup?.getAuthToken() ?? ''}`,
+            Accept: 'application/json',
+            ...(body ? { 'Content-Type': 'application/json' } : {}),
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+    }).then(async r => {
+        let data = {}
+        try { data = await r.json() } catch { /* non-JSON response */ }
+        return { res: r, data }
     })
 }
 
-function fetchMembers() {
-    if (membersLoaded.value || loadingMembers.value) return
-    loadingMembers.value = true
-    syncBc.postMessage({ type: 'fetch-members', channelId: channelId.value })
+// ── SDP sanitisation ───────────────────────────────────────────────────────────
+// Strip all a=ssrc lines — Unified Plan doesn't need them and Brave's privacy
+// modes generate/reject them inconsistently.
+// Also strips known-incompatible codecs (FEC family, H265) and chases RTX chains.
+// extraBadPt: additional payload types discovered by the connectPeer retry loop.
+function sanitizeSdp(sdp, extraBadPt = null) {
+    const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+
+    const BAD_CODECS = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//
+    const badPt = new Set(extraBadPt ?? [])
+    for (const l of lines) {
+        const m = l.match(/^a=rtpmap:(\d+) /)
+        if (m && BAD_CODECS.test(l)) badPt.add(m[1])
+    }
+    // Fixpoint: chase RTX chains — RTX whose apt= target is removed must also be removed
+    let grew = true
+    while (grew) {
+        grew = false
+        for (const l of lines) {
+            const m = l.match(/^a=fmtp:(\d+) apt=(\d+)/)
+            if (m && badPt.has(m[2]) && !badPt.has(m[1])) {
+                badPt.add(m[1])
+                grew = true
+            }
+        }
+    }
+
+    return lines
+        .filter(l => {
+            if (/^a=ssrc[-:]/.test(l)) return false
+            const pt = l.match(/^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)[ /]/)
+            if (pt && badPt.has(pt[1])) return false
+            return true
+        })
+        .map(l => {
+            if (!l.startsWith('m=')) return l
+            const parts = l.split(' ')
+            const fmts  = parts.slice(3).filter(pt => !badPt.has(pt))
+            return [...parts.slice(0, 3), ...fmts].join(' ')
+        })
+        .join('\r\n')
 }
 
-function inviteMember(member) {
+// ── ICE gathering ──────────────────────────────────────────────────────────────
+function waitForIce(pc) {
+    return new Promise(resolve => {
+        if (pc.iceGatheringState === 'complete') { resolve(); return }
+        const check = () => {
+            if (pc.iceGatheringState === 'complete') {
+                pc.removeEventListener('icegatheringstatechange', check)
+                resolve()
+            }
+        }
+        pc.addEventListener('icegatheringstatechange', check)
+        setTimeout(resolve, 8000)
+    })
+}
+
+// ── BroadcastChannels ──────────────────────────────────────────────────────────
+let syncBc       = null   // sends room-created / room-closed / peers-update to main window tabs
+let cmdBc        = null   // receives invite commands from the context menu
+let compositorBc = null
+
+function broadcastPeersUpdate() {
+    syncBc?.postMessage({
+        type: 'peers-update',
+        channelId,
+        peers: peers.value.map(({ memberId, username, slotKey, state }) =>
+            ({ memberId, username, slotKey, state })),
+    })
+}
+
+// ── Session management ─────────────────────────────────────────────────────────
+async function startSession() {
+    starting.value = true
+    error.value    = ''
+    try {
+        // Create platform plugin-room (handles channel locking)
+        let { res: r1, data: d1 } = await apiFetch('POST', '/api/plugin-rooms/participants',
+            { channel_id: channelId })
+
+        // 409 means a stale room exists — close it and retry once
+        if (r1.status === 409 && d1.room?.id) {
+            await apiFetch('POST', `/api/plugin-rooms/participants/${d1.room.id}/close`)
+            ;({ res: r1, data: d1 } = await apiFetch('POST', '/api/plugin-rooms/participants',
+                { channel_id: channelId }))
+        }
+
+        if (!r1.ok) throw new Error(d1.message ?? `HTTP ${r1.status}`)
+        const pluginRoomId = d1.room?.id
+        if (!pluginRoomId) throw new Error('No plugin_room_id from platform')
+
+        // Create our own discussion room record
+        const { res: r2, data: d2 } = await apiFetch('POST', '/api/plugins/participants/rooms',
+            { channel_id: channelId, plugin_room_id: pluginRoomId })
+        if (!r2.ok) throw new Error(d2.message ?? d2.error ?? `HTTP ${r2.status}`)
+        const ourRoomId = d2.room?.id
+
+        session.value = { active: true, pluginRoomId, ourRoomId }
+        syncBc.postMessage({ type: 'room-created', channelId, pluginRoomId, ourRoomId })
+        startPolling(pluginRoomId)
+        fetchMembers()
+    } catch (err) {
+        error.value = 'Could not start: ' + (err.message ?? 'Unknown error')
+    } finally {
+        starting.value = false
+    }
+}
+
+async function endSession() {
+    const { pluginRoomId, ourRoomId } = session.value
+    stopPolling()
+    // Disconnect all peers before broadcasting room-closed
+    for (const [memberId] of _pcs) removePeer(memberId)
+    if (pluginRoomId) apiFetch('POST', `/api/plugin-rooms/participants/${pluginRoomId}/close`).catch(() => {})
+    if (ourRoomId)    apiFetch('DELETE', `/api/plugins/participants/rooms/${ourRoomId}`).catch(() => {})
+    session.value = { active: false, pluginRoomId: null, ourRoomId: null }
+    syncBc.postMessage({ type: 'room-closed', channelId, peers: [] })
+}
+
+// ── Polling ────────────────────────────────────────────────────────────────────
+function startPolling(pluginRoomId) {
+    stopPolling()
+    _pollTimer = setInterval(() => pollRoom(pluginRoomId), 2000)
+}
+
+function stopPolling() {
+    clearInterval(_pollTimer)
+    _pollTimer = null
+}
+
+async function pollRoom(pluginRoomId) {
+    let data
+    try {
+        const { res, data: d } = await apiFetch('GET', `/api/plugin-rooms/participants/${pluginRoomId}`)
+        if (!res.ok || !d.room) return
+        data = d.room.data ?? {}
+    } catch { return }
+
+    for (const [key, offerSdp] of Object.entries(data)) {
+        if (!key.endsWith('_offer') || typeof offerSdp !== 'string') continue
+        const memberId = key.slice(0, -6)
+        if (_answered.has(memberId)) continue
+        _answered.add(memberId)
+        const username = data[`${memberId}_username`] ?? 'Participant'
+        connectPeer(memberId, username, offerSdp, pluginRoomId)
+    }
+
+    for (const peer of peers.value.slice()) {
+        if (data[`${peer.memberId}_status`] === 'disconnected') removePeer(peer.memberId)
+    }
+
+    broadcastPeersUpdate()
+}
+
+// ── WebRTC ─────────────────────────────────────────────────────────────────────
+async function connectPeer(memberId, username, offerSdp, pluginRoomId) {
+    const slotKey = `participants-${memberId}`
+    const pc = new RTCPeerConnection(RTC_CONFIG)
+    _pcs.set(memberId, pc)
+
+    const peer = { memberId, username, slotKey, state: 'connecting' }
+    peers.value.push(peer)
+    broadcastPeersUpdate()
+
+    pc.onconnectionstatechange = () => {
+        const peerEntry = peers.value.find(p => p.memberId === memberId)
+        if (!peerEntry) return
+        const cs = pc.connectionState
+        peerEntry.state = cs === 'connected'   ? 'connected'
+            : (cs === 'failed' || cs === 'disconnected' || cs === 'closed') ? 'failed'
+            : 'connecting'
+        broadcastPeersUpdate()
+        if (peerEntry.state === 'failed') removePeer(memberId)
+    }
+
+    // Accumulate arriving tracks into a single stream — ontrack fires once per track
+    // (video first, then audio). We call registerStream on each arrival so the
+    // compositor slot gets updated progressively.
+    const incomingStream = new MediaStream()
+    pc.ontrack = (e) => {
+        incomingStream.addTrack(e.track)
+        if (window.opener?.__eluthDiscussion) {
+            window.opener.__eluthDiscussion.registerStream(memberId, incomingStream, username)
+        }
+    }
+
+    try {
+        // Retry loop: if setRemoteDescription fails with "a=fmtp:<rtx> apt=<pt>
+        // Invalid SDP line", the browser silently rejected <pt>'s definition.
+        // Extract the bad payload types from the error, re-sanitize, and retry.
+        const extraBadPt = new Set()
+        let cleanSdp = sanitizeSdp(offerSdp)
+        let sdpSet   = false
+        for (let attempt = 0; attempt < 30 && !sdpSet; attempt++) {
+            try {
+                await pc.setRemoteDescription({ type: 'offer', sdp: cleanSdp })
+                sdpSet = true
+            } catch (e) {
+                const m = e.message.match(/a=fmtp:(\d+) apt=(\d+) Invalid SDP line/)
+                if (!m) throw e
+                extraBadPt.add(m[1])
+                extraBadPt.add(m[2])
+                cleanSdp = sanitizeSdp(offerSdp, extraBadPt)
+            }
+        }
+        if (!sdpSet) throw new Error('Could not set remote description after stripping incompatible codecs')
+        const answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        await waitForIce(pc)
+        await apiFetch('PUT', `/api/plugin-rooms/participants/${pluginRoomId}/data`, {
+            data: { [`${memberId}_answer`]: pc.localDescription.sdp },
+        })
+    } catch (err) {
+        console.warn('[DiscussionControls] connectPeer failed:', memberId, err)
+        const peerEntry = peers.value.find(p => p.memberId === memberId)
+        if (peerEntry) peerEntry.state = 'failed'
+        removePeer(memberId)
+    }
+}
+
+function removePeer(memberId) {
+    const idx = peers.value.findIndex(p => p.memberId === memberId)
+    if (idx !== -1) peers.value.splice(idx, 1)
+    const pc = _pcs.get(memberId)
+    if (pc) { pc.close(); _pcs.delete(memberId) }
+    _answered.delete(memberId)
+    if (window.opener?.__eluthDiscussion) {
+        window.opener.__eluthDiscussion.unregisterStream(memberId)
+    }
+    broadcastPeersUpdate()
+}
+
+// ── Member fetch & invite ──────────────────────────────────────────────────────
+async function fetchMembers() {
+    if (membersLoaded.value || loadingMembers.value) return
+    loadingMembers.value = true
+    try {
+        const { data } = await apiFetch('GET', `/api/members?channel_id=${channelId}`)
+        members.value       = data.members ?? data ?? []
+        membersLoaded.value = true
+    } catch { /* silent fail */ } finally {
+        loadingMembers.value = false
+    }
+}
+
+async function inviteMember(member) {
     const memberId = member.id ?? member.member_id
     if (!memberId || !session.value.ourRoomId) return
     inviteState.value = { ...inviteState.value, [memberId]: 'sending' }
-    syncBc.postMessage({
-        type: 'invite-member', ourRoomId: session.value.ourRoomId,
-        memberId, username: member.username ?? '',
-    })
+    try {
+        const { res, data } = await apiFetch('POST',
+            `/api/plugins/participants/rooms/${session.value.ourRoomId}/invite`,
+            { member_id: memberId, username: member.username ?? '' })
+        if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
+        inviteState.value = { ...inviteState.value, [memberId]: 'sent' }
+    } catch {
+        inviteState.value = { ...inviteState.value, [memberId]: 'error' }
+    }
 }
 
 // ── Per-participant source controls ────────────────────────────────────────────
@@ -360,11 +544,9 @@ function onTransformField(peer, field, rawValue) {
 
 function addToScene(peer) {
     compositorBc.postMessage({ type: 'add-layer', sourceKey: peer.slotKey })
-    // Wait for state update then set a sensible default size
     waitForCompositorState().then(() => {
         const layer = layerForPeer(peer)
         if (layer && layer.w === 1 && layer.h === 1) {
-            // Default: small camera in top-right
             compositorBc.postMessage({ type: 'set-transform', id: layer.id, x: 0.77, y: 0.01, w: 0.22, h: 0.22 })
         }
     })
@@ -451,19 +633,50 @@ async function applyLayout() {
 }
 
 // ── Lifecycle ──────────────────────────────────────────────────────────────────
+const _handleBeforeUnload = () => {
+    if (session.value.active) {
+        syncBc?.postMessage({ type: 'room-closed', channelId, peers: [] })
+        for (const pc of _pcs.values()) pc.close()
+    }
+}
+
 onMounted(() => {
-    setupChannels()
-    syncBc.postMessage({ type: 'request-state', channelId: channelId.value })
-    // Periodically re-sync in case the relay leader changed while the popup was open
-    stateRefreshTimer = setInterval(
-        () => syncBc.postMessage({ type: 'request-state', channelId: channelId.value }),
-        30_000
-    )
+    syncBc       = new BroadcastChannel('eluth-discussion-sync')
+    compositorBc = new BroadcastChannel(`eluth-stream-${channelId}`)
+    compositorBc.onmessage = (e) => {
+        if (e.data?.type === 'state') compositorState.value = e.data
+    }
+
+    // Listen for invite commands broadcast by the context menu handler in index.js
+    if (channelId) {
+        cmdBc = new BroadcastChannel(`eluth-discussion-${channelId}`)
+        cmdBc.onmessage = (e) => {
+            const msg = e.data
+            if (msg?.type === 'invite-member' && session.value.active) {
+                inviteMember({ id: msg.memberId, username: msg.username })
+            }
+        }
+    }
+
+    window.addEventListener('beforeunload', _handleBeforeUnload)
 })
 
 onUnmounted(() => {
-    clearInterval(stateRefreshTimer)
+    window.removeEventListener('beforeunload', _handleBeforeUnload)
+    stopPolling()
+    for (const [memberId, pc] of _pcs) {
+        pc.close()
+        if (window.opener?.__eluthDiscussion) {
+            window.opener.__eluthDiscussion.unregisterStream(memberId)
+        }
+    }
+    _pcs.clear()
+    _answered.clear()
+    if (session.value.active) {
+        syncBc?.postMessage({ type: 'room-closed', channelId, peers: [] })
+    }
     syncBc?.close()
+    cmdBc?.close()
     compositorBc?.close()
 })
 </script>
