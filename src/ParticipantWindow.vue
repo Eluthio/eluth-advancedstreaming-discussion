@@ -165,7 +165,7 @@ async function joinSession() {
         await waitForIce(pc)
 
         // Write offer to room
-        await api('PUT', `/api/plugin-rooms/participants/${props.roomId}/data`, {
+        await api('PUT', `/plugin-rooms/participants/${props.roomId}/data`, {
             data: {
                 [`${memberId}_offer`]:    pc.localDescription.sdp,
                 [`${memberId}_username`]: username,
@@ -182,7 +182,7 @@ async function joinSession() {
         await waitForConnection(pc)
 
         // Mark connected
-        await api('PUT', `/api/plugin-rooms/participants/${props.roomId}/data`, {
+        await api('PUT', `/plugin-rooms/participants/${props.roomId}/data`, {
             data: { [`${memberId}_status`]: 'connected' },
         })
 
@@ -210,7 +210,7 @@ async function pollForAnswer(memberId, timeout = 30000) {
     const deadline = Date.now() + timeout
     while (Date.now() < deadline) {
         try {
-            const res  = await api('GET', `/api/plugin-rooms/participants/${props.roomId}`)
+            const res  = await api('GET', `/plugin-rooms/participants/${props.roomId}`)
             const data = res.room?.data ?? {}
             const sdp  = data[`${memberId}_answer`]
             if (sdp) return sdp
@@ -251,7 +251,7 @@ function waitForConnection(pc) {
 async function leaveSession() {
     const memberId = getMemberId()
     try {
-        await api('PUT', `/api/plugin-rooms/participants/${props.roomId}/data`, {
+        await api('PUT', `/plugin-rooms/participants/${props.roomId}/data`, {
             data: { [`${memberId}_status`]: 'disconnected' },
         })
     } catch { /* ignore */ }
