@@ -86,26 +86,11 @@ const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
 function sanitizeSdp(sdp, extraBadPt = null) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
 
-    let localSupported = null
-    try {
-        const vcaps = RTCRtpReceiver.getCapabilities?.('video')
-        const acaps = RTCRtpReceiver.getCapabilities?.('audio')
-        if (vcaps || acaps) {
-            localSupported = new Set(
-                [...(vcaps?.codecs ?? []), ...(acaps?.codecs ?? [])].map(c => c.mimeType.split('/')[1].toUpperCase())
-            )
-        }
-    } catch { /* API unavailable */ }
-
-    const FEC = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//
+    const BAD_CODECS = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//
     const badPt = new Set(extraBadPt ?? [])
     for (const l of lines) {
-        const m = l.match(/^a=rtpmap:(\d+) ([^/]+)\//)
-        if (!m) continue
-        const [, pt, name] = m
-        const upper = name.toUpperCase()
-        if (FEC.test(l)) { badPt.add(pt); continue }
-        if (localSupported && upper !== 'RTX' && !localSupported.has(upper)) badPt.add(pt)
+        const m = l.match(/^a=rtpmap:(\d+) /)
+        if (m && BAD_CODECS.test(l)) badPt.add(m[1])
     }
     let grew = true
     while (grew) {

@@ -261,35 +261,17 @@ async function stopSession(channelId) {
 function sanitizeSdp(sdp, extraBadPt = null) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
 
-    // Ask this browser what video codecs it can actually receive.
-    // RTX is a retransmission helper — we handle it separately via apt= chains.
-    let localSupported = null
-    try {
-        const vcaps = RTCRtpReceiver.getCapabilities?.('video')
-        const acaps = RTCRtpReceiver.getCapabilities?.('audio')
-        if (vcaps || acaps) {
-            localSupported = new Set(
-                [...(vcaps?.codecs ?? []), ...(acaps?.codecs ?? [])].map(c => c.mimeType.split('/')[1].toUpperCase())
-            )
-        }
-    } catch { /* API unavailable */ }
-
-    // Build the set of payload types to remove:
-    //  • Always remove FEC codecs (ulpfec, red, flexfec-03) — they cause
-    //    cross-browser SDP parse failures even when listed as "supported".
-    //  • If getCapabilities() is available, also remove any codec the local
-    //    peer doesn't support (e.g. H.265 on builds without HEVC WebRTC).
-    // H265 is also force-stripped: Brave/Chrome advertise it via getCapabilities
-    // but fail to parse H265 SDP lines in setRemoteDescription on many platforms.
-    const FEC = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//
+    // Statically strip known-problematic codecs:
+    //  • FEC codecs (ulpfec, red, flexfec-03) cause cross-browser SDP parse failures.
+    //  • H265: Brave/Chrome advertise it via getCapabilities but silently reject its
+    //    SDP lines in setRemoteDescription on many platforms.
+    // Any other codecs that the host browser silently rejects will be discovered
+    // and stripped by the retry loop in connectPeer (extraBadPt), not here.
+    const BAD_CODECS = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//
     const badPt = new Set(extraBadPt ?? [])
     for (const l of lines) {
-        const m = l.match(/^a=rtpmap:(\d+) ([^/]+)\//)
-        if (!m) continue
-        const [, pt, name] = m
-        const upper = name.toUpperCase()
-        if (FEC.test(l)) { badPt.add(pt); continue }
-        if (localSupported && upper !== 'RTX' && !localSupported.has(upper)) badPt.add(pt)
+        const m = l.match(/^a=rtpmap:(\d+) /)
+        if (m && BAD_CODECS.test(l)) badPt.add(m[1])
     }
     // Fixpoint: chase RTX chains — an RTX whose apt= target is removed must
     // also be removed, and this may cascade multiple levels.
