@@ -88,8 +88,13 @@ function sanitizeSdp(sdp) {
 
     let localSupported = null
     try {
-        const caps = RTCRtpReceiver.getCapabilities?.('video')
-        if (caps) localSupported = new Set(caps.codecs.map(c => c.mimeType.split('/')[1].toUpperCase()))
+        const vcaps = RTCRtpReceiver.getCapabilities?.('video')
+        const acaps = RTCRtpReceiver.getCapabilities?.('audio')
+        if (vcaps || acaps) {
+            localSupported = new Set(
+                [...(vcaps?.codecs ?? []), ...(acaps?.codecs ?? [])].map(c => c.mimeType.split('/')[1].toUpperCase())
+            )
+        }
     } catch { /* API unavailable */ }
 
     const FEC = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03)\//
