@@ -257,7 +257,8 @@ async function stopSession(channelId) {
 // own a=msid: line. Different Brave privacy modes generate or reject specific
 // a=ssrc attribute formats inconsistently, so removing them all is the
 // safest cross-mode fix.
-function sanitizeSdp(sdp) {
+// extraBadPt: additional payload type strings to treat as bad on retry passes.
+function sanitizeSdp(sdp, extraBadPt = null) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
 
     // Ask this browser what video codecs it can actually receive.
@@ -281,7 +282,7 @@ function sanitizeSdp(sdp) {
     // H265 is also force-stripped: Brave/Chrome advertise it via getCapabilities
     // but fail to parse H265 SDP lines in setRemoteDescription on many platforms.
     const FEC = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//
-    const badPt = new Set()
+    const badPt = new Set(extraBadPt ?? [])
     for (const l of lines) {
         const m = l.match(/^a=rtpmap:(\d+) ([^/]+)\//)
         if (!m) continue
@@ -357,7 +358,23 @@ async function connectPeer(session, memberId, username, offerSdp, pluginRoomId, 
     }
 
     try {
-        await pc.setRemoteDescription({ type: 'offer', sdp: sanitizeSdp(offerSdp) })
+        // Retry loop: if setRemoteDescription fails with "a=fmtp:<rtx> apt=<pt>
+        // Invalid SDP line", the browser silently rejected <pt>'s definition.
+        // Extract the bad pts from the error, re-sanitize, and retry.
+        const extraBadPt = new Set()
+        let cleanSdp = sanitizeSdp(offerSdp)
+        for (let attempt = 0; attempt < 8; attempt++) {
+            try {
+                await pc.setRemoteDescription({ type: 'offer', sdp: cleanSdp })
+                break
+            } catch (e) {
+                const m = e.message.match(/a=fmtp:(\d+) apt=(\d+) Invalid SDP line/)
+                if (!m) throw e
+                extraBadPt.add(m[1])
+                extraBadPt.add(m[2])
+                cleanSdp = sanitizeSdp(offerSdp, extraBadPt)
+            }
+        }
         const answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         await waitForIce(pc)

@@ -83,7 +83,7 @@ const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
 
 // Strip a=ssrc lines (cross-browser incompatibility) and any codecs the local
 // browser doesn't support, using RTCRtpReceiver.getCapabilities() where available.
-function sanitizeSdp(sdp) {
+function sanitizeSdp(sdp, extraBadPt = null) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
 
     let localSupported = null
@@ -98,7 +98,7 @@ function sanitizeSdp(sdp) {
     } catch { /* API unavailable */ }
 
     const FEC = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//
-    const badPt = new Set()
+    const badPt = new Set(extraBadPt ?? [])
     for (const l of lines) {
         const m = l.match(/^a=rtpmap:(\d+) ([^/]+)\//)
         if (!m) continue
@@ -229,7 +229,20 @@ async function joinSession() {
         // Poll for host answer
         const answerSdp = await pollForAnswer(memberId)
 
-        await pc.setRemoteDescription({ type: 'answer', sdp: sanitizeSdp(answerSdp) })
+        const extraBadPt = new Set()
+        let cleanSdp = sanitizeSdp(answerSdp)
+        for (let attempt = 0; attempt < 8; attempt++) {
+            try {
+                await pc.setRemoteDescription({ type: 'answer', sdp: cleanSdp })
+                break
+            } catch (e) {
+                const m = e.message.match(/a=fmtp:(\d+) apt=(\d+) Invalid SDP line/)
+                if (!m) throw e
+                extraBadPt.add(m[1])
+                extraBadPt.add(m[2])
+                cleanSdp = sanitizeSdp(answerSdp, extraBadPt)
+            }
+        }
 
         // Wait for connection
         await waitForConnection(pc)
