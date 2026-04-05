@@ -363,10 +363,11 @@ async function connectPeer(session, memberId, username, offerSdp, pluginRoomId, 
         // Extract the bad pts from the error, re-sanitize, and retry.
         const extraBadPt = new Set()
         let cleanSdp = sanitizeSdp(offerSdp)
-        for (let attempt = 0; attempt < 8; attempt++) {
+        let sdpSet = false
+        for (let attempt = 0; attempt < 30 && !sdpSet; attempt++) {
             try {
                 await pc.setRemoteDescription({ type: 'offer', sdp: cleanSdp })
-                break
+                sdpSet = true
             } catch (e) {
                 const m = e.message.match(/a=fmtp:(\d+) apt=(\d+) Invalid SDP line/)
                 if (!m) throw e
@@ -375,6 +376,7 @@ async function connectPeer(session, memberId, username, offerSdp, pluginRoomId, 
                 cleanSdp = sanitizeSdp(offerSdp, extraBadPt)
             }
         }
+        if (!sdpSet) throw new Error('Could not set remote description after stripping incompatible codecs')
         const answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         await waitForIce(pc)

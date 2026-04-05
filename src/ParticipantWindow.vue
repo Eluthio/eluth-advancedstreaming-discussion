@@ -231,10 +231,11 @@ async function joinSession() {
 
         const extraBadPt = new Set()
         let cleanSdp = sanitizeSdp(answerSdp)
-        for (let attempt = 0; attempt < 8; attempt++) {
+        let sdpSet = false
+        for (let attempt = 0; attempt < 30 && !sdpSet; attempt++) {
             try {
                 await pc.setRemoteDescription({ type: 'answer', sdp: cleanSdp })
-                break
+                sdpSet = true
             } catch (e) {
                 const m = e.message.match(/a=fmtp:(\d+) apt=(\d+) Invalid SDP line/)
                 if (!m) throw e
@@ -243,6 +244,7 @@ async function joinSession() {
                 cleanSdp = sanitizeSdp(answerSdp, extraBadPt)
             }
         }
+        if (!sdpSet) throw new Error('Could not set remote description after stripping incompatible codecs')
 
         // Wait for connection
         await waitForConnection(pc)
