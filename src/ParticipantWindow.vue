@@ -87,12 +87,19 @@ function sanitizeSdp(sdp) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
     const badPt = new Set()
     for (const l of lines) {
-        const m = l.match(/^a=rtpmap:(\d+) (?:ulpfec|red)\//)
+        const m = l.match(/^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03)\//)
         if (m) badPt.add(m[1])
     }
-    for (const l of lines) {
-        const m = l.match(/^a=fmtp:(\d+) apt=(\d+)/)
-        if (m && badPt.has(m[2])) badPt.add(m[1])
+    let grew = true
+    while (grew) {
+        grew = false
+        for (const l of lines) {
+            const m = l.match(/^a=fmtp:(\d+) apt=(\d+)/)
+            if (m && badPt.has(m[2]) && !badPt.has(m[1])) {
+                badPt.add(m[1])
+                grew = true
+            }
+        }
     }
     return lines
         .filter(l => {
