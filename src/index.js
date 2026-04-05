@@ -195,6 +195,7 @@ function buildSessionState(channelId) {
 }
 
 async function startSession(channelId, pluginRoomId, ourRoomId) {
+    console.log('[Discussion] startSession', { channelId, pluginRoomId, ourRoomId })
     await stopSession(channelId)
 
     const session = { channelId, pluginRoomId, ourRoomId, answered: new Set(), peers: [], pollTimer: null }
@@ -523,17 +524,17 @@ function listenForSync() {
         }
     }
 
+    console.log('[Discussion] listenForSync: initialising, locks API available:', 'locks' in navigator)
+
     if ('locks' in navigator) {
-        // Exclusive lock — first tab gets it and handles all messages.
-        // Other tabs block here and take over automatically when the leader closes.
         navigator.locks.request('eluth-participants-relay', async () => {
-            // Announce to all control UIs that this is a fresh leader with no active sessions.
-            // This resets any stale "Active" state shown in streaming control popups.
+            console.log('[Discussion] leader elected — this tab handles all relay messages')
             _syncBc.postMessage({ type: 'leader-reset' })
             attachHandler()
             await new Promise(resolve => window.addEventListener('unload', resolve, { once: true }))
-        }).catch(() => {})
+        }).catch(e => console.warn('[Discussion] lock request failed:', e))
     } else {
+        console.log('[Discussion] Web Locks unavailable — attaching handler directly')
         attachHandler()
     }
 }
