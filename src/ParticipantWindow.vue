@@ -85,8 +85,28 @@ const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
 // rejected inconsistently across Brave's normal vs incognito privacy modes.
 function sanitizeSdp(sdp) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+    const badPt = new Set()
+    for (const l of lines) {
+        const m = l.match(/^a=rtpmap:(\d+) (?:ulpfec|red)\//)
+        if (m) badPt.add(m[1])
+    }
+    for (const l of lines) {
+        const m = l.match(/^a=fmtp:(\d+) apt=(\d+)/)
+        if (m && badPt.has(m[2])) badPt.add(m[1])
+    }
     return lines
-        .filter(line => !/^a=ssrc[-:]/.test(line))
+        .filter(l => {
+            if (/^a=ssrc[-:]/.test(l)) return false
+            const pt = l.match(/^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)[ /]/)
+            if (pt && badPt.has(pt[1])) return false
+            return true
+        })
+        .map(l => {
+            if (!l.startsWith('m=')) return l
+            const parts = l.split(' ')
+            const fmts = parts.slice(3).filter(pt => !badPt.has(pt))
+            return [...parts.slice(0, 3), ...fmts].join(' ')
+        })
         .join('\r\n')
 }
 
