@@ -239,8 +239,9 @@ function peerTransform(peer) {
 function round4(n) { return Math.round((n ?? 0) * 10000) / 10000 }
 
 // ── BroadcastChannels ──────────────────────────────────────────────────────────
-let syncBc       = null
-let compositorBc = null
+let syncBc          = null
+let compositorBc    = null
+let stateRefreshTimer = null
 
 function setupChannels() {
     syncBc = new BroadcastChannel('eluth-discussion-sync')
@@ -274,6 +275,12 @@ function handleSyncMessage(msg) {
             break
         case 'room-closed':
             if (msg.channelId !== channelId.value) return
+            session.value = { active: false, pluginRoomId: null, ourRoomId: null }
+            peers.value   = []
+            break
+        case 'leader-reset':
+            // A new relay leader has taken over (e.g. after a page refresh) — it has
+            // no active sessions, so reset our local state to match.
             session.value = { active: false, pluginRoomId: null, ourRoomId: null }
             peers.value   = []
             break
@@ -447,9 +454,15 @@ async function applyLayout() {
 onMounted(() => {
     setupChannels()
     syncBc.postMessage({ type: 'request-state', channelId: channelId.value })
+    // Periodically re-sync in case the relay leader changed while the popup was open
+    stateRefreshTimer = setInterval(
+        () => syncBc.postMessage({ type: 'request-state', channelId: channelId.value }),
+        30_000
+    )
 })
 
 onUnmounted(() => {
+    clearInterval(stateRefreshTimer)
     syncBc?.close()
     compositorBc?.close()
 })

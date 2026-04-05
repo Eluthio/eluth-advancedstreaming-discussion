@@ -442,6 +442,9 @@ function listenForSync() {
         // Exclusive lock — first tab gets it and handles all messages.
         // Other tabs block here and take over automatically when the leader closes.
         navigator.locks.request('eluth-participants-relay', async () => {
+            // Announce to all control UIs that this is a fresh leader with no active sessions.
+            // This resets any stale "Active" state shown in streaming control popups.
+            _syncBc.postMessage({ type: 'leader-reset' })
             attachHandler()
             await new Promise(resolve => window.addEventListener('unload', resolve, { once: true }))
         }).catch(() => {})
