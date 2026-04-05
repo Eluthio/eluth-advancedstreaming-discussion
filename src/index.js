@@ -527,6 +527,12 @@ function listenForSync() {
     console.log('[Discussion] listenForSync: initialising, locks API available:', 'locks' in navigator)
 
     if ('locks' in navigator) {
+        navigator.locks.query().then(s => {
+            const held = s.held.find(l => l.name === 'eluth-participants-relay')
+            const pending = s.pending.filter(l => l.name === 'eluth-participants-relay').length
+            console.log('[Discussion] lock state — held:', !!held, '| pending waiters:', pending,
+                held ? '(another tab is the leader — check that tab\'s console)' : '(this tab will become leader)')
+        })
         navigator.locks.request('eluth-participants-relay', async () => {
             console.log('[Discussion] leader elected — this tab handles all relay messages')
             _syncBc.postMessage({ type: 'leader-reset' })
