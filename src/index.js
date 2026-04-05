@@ -218,15 +218,26 @@ async function startSession(channelId, pluginRoomId, ourRoomId) {
         let data
         try {
             const res = await apiFetch('GET', `/api/plugin-rooms/participants/${pluginRoomId}`)
-            data = res.room?.data ?? {}
-        } catch { return }
+            if (!res.room) {
+                console.warn('[Discussion] poll: no room in response', res)
+                return
+            }
+            data = res.room.data ?? {}
+        } catch (e) {
+            console.warn('[Discussion] poll error:', e)
+            return
+        }
 
         for (const [key, offerSdp] of Object.entries(data)) {
             if (!key.endsWith('_offer') || typeof offerSdp !== 'string') continue
             const memberId = key.slice(0, -6)
-            if (session.answered.has(memberId)) continue
+            if (session.answered.has(memberId)) {
+                console.log('[Discussion] poll: skipping already-answered', memberId)
+                continue
+            }
             session.answered.add(memberId)
             const username = data[`${memberId}_username`] ?? 'Participant'
+            console.log('[Discussion] poll: found offer from', memberId, username)
             connectPeer(session, memberId, username, offerSdp, pluginRoomId, apiFetch)
         }
 
