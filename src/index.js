@@ -1,4 +1,3 @@
-import { createApp } from 'vue'
 import DiscussionControls  from './DiscussionControls.vue'
 import DiscussionNotifier  from './DiscussionNotifier.vue'
 import ParticipantWindow   from './ParticipantWindow.vue'
@@ -555,28 +554,15 @@ window.__EluthPlugins['participants'] = {
     zones:     ['channel-header'],
     component: DiscussionNotifier,
 
+    // Popup components — mounted by PopupShell when URL matches the popup registry.
+    // bootstrap() is never called in popup contexts.
+    popupComponents: {
+        ParticipantWindow,
+    },
+
     async bootstrap(api) {
-        const params     = new URLSearchParams(window.location.search)
-        const joinRoomId = params.get('participants_join')
-
-        // ── Participant join popup ──────────────────────────────────────────
-        if (joinRoomId) {
-            document.title = 'Discussion — Joining'
-            const div = document.createElement('div')
-            div.id = 'pd-join-root'
-            document.body.appendChild(div)
-            createApp(ParticipantWindow, {
-                roomId:    joinRoomId,
-                authToken: localStorage.getItem('eluth_token') ?? '',
-                apiBase:   api.apiBase ?? '/api',
-            }).mount(div)
-            return
-        }
-
-        // ── Streaming control popup — base source already registered ────────
-        if (params.get('popup') === 'stream-control') return
-
-        // ── Main window ─────────────────────────────────────────────────────
+        // bootstrap() only runs in the main window (not in any popup context).
+        // PopupShell prevents bootstrap() calls in all popup windows.
         listenForSync()
     },
 

@@ -83,7 +83,7 @@ async function acceptInvite() {
     if (data?.plugin_room_id) {
         const origin = window._eluthCommunityUrl ?? window.location.origin
         window.open(
-            `${origin.replace(/\/$/, '')}/?participants_join=${data.plugin_room_id}`,
+            `${origin.replace(/\/$/, '')}/?discuss_participantsjoin=${data.plugin_room_id}`,
             `pd-join-${data.plugin_room_id}`,
             'width=480,height=540,resizable=yes'
         )

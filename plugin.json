@@ -1,11 +1,24 @@
 {
   "name": "Discussion",
   "slug": "participants",
-  "version": "2.0.31",
-  "min_server_version": "1.5.25",
+  "version": "2.1.0",
+  "min_server_version": "1.6.0",
   "tier": "official",
   "entry": "index.js",
   "zones": ["channel-header"],
+  "popups": [
+    {
+      "param": "discuss_participantsjoin",
+      "component": "ParticipantWindow",
+      "title": "Join Discussion"
+    }
+  ],
+  "controls": [
+    {
+      "popup": "stream-control",
+      "component": "DiscussionControls"
+    }
+  ],
   "requires": {
     "tables": ["participants_rooms", "participants_invites"]
   }

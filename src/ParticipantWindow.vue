@@ -57,11 +57,11 @@
 <script setup>
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 
-const props = defineProps({
-    roomId:    { type: String, required: true },
-    authToken: { type: String, required: true },
-    apiBase:   { type: String, required: true },
-})
+// Context is provided by the popup shell via window.__eluthPopup (no props needed).
+const _popup     = window.__eluthPopup
+const roomId     = _popup?.getParam('discuss_participantsjoin') ?? ''
+const authToken  = _popup?.getAuthToken() ?? ''
+const apiBase    = '/api'
 
 const phase       = ref('setup')   // 'setup' | 'connected' | 'failed'
 const joining     = ref(false)
@@ -119,18 +119,18 @@ function sanitizeSdp(sdp, extraBadPt = null) {
         .join('\r\n')
 }
 
-function base() { return props.apiBase.replace(/\/$/, '') }
+function base() { return apiBase.replace(/\/$/, '') }
 function getMemberId() {
-    try { return JSON.parse(atob(props.authToken.split('.')[1])).sub ?? null } catch { return null }
+    try { return JSON.parse(atob(authToken.split('.')[1])).sub ?? null } catch { return null }
 }
 function getUsername() {
-    try { return JSON.parse(atob(props.authToken.split('.')[1])).username ?? 'Participant' } catch { return 'Participant' }
+    try { return JSON.parse(atob(authToken.split('.')[1])).username ?? 'Participant' } catch { return 'Participant' }
 }
 
 async function api(method, path, body) {
     const res = await fetch(`${base()}${path}`, {
         method,
-        headers: { Authorization: `Bearer ${props.authToken}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+        headers: { Authorization: `Bearer ${authToken}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
         ...(body ? { body: JSON.stringify(body) } : {}),
     })
     if (!res.ok) {
@@ -203,7 +203,7 @@ async function joinSession() {
         await waitForIce(pc)
 
         // Write offer to room
-        await api('PUT', `/plugin-rooms/participants/${props.roomId}/data`, {
+        await api('PUT', `/plugin-rooms/participants/${roomId}/data`, {
             data: {
                 [`${memberId}_offer`]:    pc.localDescription.sdp,
                 [`${memberId}_username`]: username,
@@ -235,7 +235,7 @@ async function joinSession() {
         await waitForConnection(pc)
 
         // Mark connected
-        await api('PUT', `/plugin-rooms/participants/${props.roomId}/data`, {
+        await api('PUT', `/plugin-rooms/participants/${roomId}/data`, {
             data: { [`${memberId}_status`]: 'connected' },
         })
 
@@ -263,7 +263,7 @@ async function pollForAnswer(memberId, timeout = 30000) {
     const deadline = Date.now() + timeout
     while (Date.now() < deadline) {
         try {
-            const res  = await api('GET', `/plugin-rooms/participants/${props.roomId}`)
+            const res  = await api('GET', `/plugin-rooms/participants/${roomId}`)
             const data = res.room?.data ?? {}
             const sdp  = data[`${memberId}_answer`]
             if (sdp) return sdp
@@ -304,7 +304,7 @@ function waitForConnection(pc) {
 async function leaveSession() {
     const memberId = getMemberId()
     try {
-        await api('PUT', `/plugin-rooms/participants/${props.roomId}/data`, {
+        await api('PUT', `/plugin-rooms/participants/${roomId}/data`, {
             data: { [`${memberId}_status`]: 'disconnected' },
         })
     } catch { /* ignore */ }
