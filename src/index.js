@@ -328,106 +328,125 @@ let _syncBc = null
 
 function listenForSync() {
     _syncBc = new BroadcastChannel('eluth-discussion-sync')
-    _syncBc.onmessage = async (e) => {
-        const msg = e.data
-        if (!msg?.type) return
 
-        const token = () => localStorage.getItem('eluth_token') ?? ''
+    // Only ONE tab should process relay messages (create-room, close-room, etc.).
+    // Use the Web Locks API to elect a leader: the first tab to acquire the lock
+    // handles all messages; other tabs queue behind it and take over automatically
+    // if the leader tab is closed. Falls back to unconditional handler in browsers
+    // without Web Locks (very old).
+    const attachHandler = () => {
+        _syncBc.onmessage = async (e) => {
+            const msg = e.data
+            if (!msg?.type) return
 
-        async function apiFetch(method, path, body) {
-            const res = await fetch(path, {
-                method,
-                headers: {
-                    Authorization: `Bearer ${token()}`,
-                    Accept: 'application/json',
-                    ...(body ? { 'Content-Type': 'application/json' } : {}),
-                },
-                ...(body ? { body: JSON.stringify(body) } : {}),
-            })
-            let data = {}
-            try { data = await res.json() } catch { /* non-JSON response (HTML error page etc.) */ }
-            return { res, data }
-        }
+            const token = () => localStorage.getItem('eluth_token') ?? ''
 
-        switch (msg.type) {
+            async function apiFetch(method, path, body) {
+                const res = await fetch(path, {
+                    method,
+                    headers: {
+                        Authorization: `Bearer ${token()}`,
+                        Accept: 'application/json',
+                        ...(body ? { 'Content-Type': 'application/json' } : {}),
+                    },
+                    ...(body ? { body: JSON.stringify(body) } : {}),
+                })
+                let data = {}
+                try { data = await res.json() } catch { /* non-JSON response (HTML error page etc.) */ }
+                return { res, data }
+            }
 
-            case 'create-room': {
-                const { channelId } = msg
-                try {
-                    let { res: r1, data: d1 } = await apiFetch('POST', '/api/plugin-rooms/participants',
-                        { channel_id: channelId })
+            switch (msg.type) {
 
-                    // 409 means a stale room exists — close it and retry once
-                    if (r1.status === 409 && d1.room?.id) {
-                        await apiFetch('POST', `/api/plugin-rooms/participants/${d1.room.id}/close`)
-                        ;({ res: r1, data: d1 } = await apiFetch('POST', '/api/plugin-rooms/participants',
-                            { channel_id: channelId }))
+                case 'create-room': {
+                    const { channelId } = msg
+                    try {
+                        let { res: r1, data: d1 } = await apiFetch('POST', '/api/plugin-rooms/participants',
+                            { channel_id: channelId })
+
+                        // 409 means a stale room exists — close it and retry once
+                        if (r1.status === 409 && d1.room?.id) {
+                            await apiFetch('POST', `/api/plugin-rooms/participants/${d1.room.id}/close`)
+                            ;({ res: r1, data: d1 } = await apiFetch('POST', '/api/plugin-rooms/participants',
+                                { channel_id: channelId }))
+                        }
+
+                        if (!r1.ok) throw new Error(d1.message ?? `HTTP ${r1.status}`)
+                        const pluginRoomId = d1.room?.id
+                        if (!pluginRoomId) throw new Error('No plugin_room_id from platform')
+
+                        const { res: r2, data: d2 } = await apiFetch('POST', '/api/plugins/participants/rooms',
+                            { channel_id: channelId, plugin_room_id: pluginRoomId })
+                        if (!r2.ok) throw new Error(d2.message ?? d2.error ?? `HTTP ${r2.status}`)
+                        const ourRoomId = d2.room?.id
+
+                        await startSession(channelId, pluginRoomId, ourRoomId)
+                        _syncBc.postMessage({ type: 'room-created', channelId, pluginRoomId, ourRoomId })
+                    } catch (err) {
+                        _syncBc.postMessage({ type: 'room-error', error: err.message })
                     }
-
-                    if (!r1.ok) throw new Error(d1.message ?? `HTTP ${r1.status}`)
-                    const pluginRoomId = d1.room?.id
-                    if (!pluginRoomId) throw new Error('No plugin_room_id from platform')
-
-                    const { res: r2, data: d2 } = await apiFetch('POST', '/api/plugins/participants/rooms',
-                        { channel_id: channelId, plugin_room_id: pluginRoomId })
-                    if (!r2.ok) throw new Error(d2.message ?? d2.error ?? `HTTP ${r2.status}`)
-                    const ourRoomId = d2.room?.id
-
-                    await startSession(channelId, pluginRoomId, ourRoomId)
-                    _syncBc.postMessage({ type: 'room-created', channelId, pluginRoomId, ourRoomId })
-                } catch (err) {
-                    _syncBc.postMessage({ type: 'room-error', error: err.message })
+                    break
                 }
-                break
-            }
 
-            case 'close-room': {
-                const { channelId, pluginRoomId, ourRoomId } = msg
-                if (pluginRoomId) {
-                    fetch(`/api/plugin-rooms/participants/${pluginRoomId}/close`, {
-                        method: 'POST', headers: { Authorization: `Bearer ${token()}` },
-                    }).catch(() => {})
+                case 'close-room': {
+                    const { channelId, pluginRoomId, ourRoomId } = msg
+                    if (pluginRoomId) {
+                        fetch(`/api/plugin-rooms/participants/${pluginRoomId}/close`, {
+                            method: 'POST', headers: { Authorization: `Bearer ${token()}` },
+                        }).catch(() => {})
+                    }
+                    if (ourRoomId) {
+                        fetch(`/api/plugins/participants/rooms/${ourRoomId}`, {
+                            method: 'DELETE', headers: { Authorization: `Bearer ${token()}` },
+                        }).catch(() => {})
+                    }
+                    await stopSession(channelId)
+                    break
                 }
-                if (ourRoomId) {
-                    fetch(`/api/plugins/participants/rooms/${ourRoomId}`, {
-                        method: 'DELETE', headers: { Authorization: `Bearer ${token()}` },
-                    }).catch(() => {})
-                }
-                await stopSession(channelId)
-                break
-            }
 
-            case 'invite-member': {
-                const { ourRoomId, memberId, username } = msg
-                try {
-                    const { res, data } = await apiFetch('POST',
-                        `/api/plugins/participants/rooms/${ourRoomId}/invite`,
-                        { member_id: memberId, username })
-                    if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
-                    _syncBc.postMessage({ type: 'invite-sent', memberId })
-                } catch (err) {
-                    _syncBc.postMessage({ type: 'invite-error', memberId, error: err.message })
+                case 'invite-member': {
+                    const { ourRoomId, memberId, username } = msg
+                    try {
+                        const { res, data } = await apiFetch('POST',
+                            `/api/plugins/participants/rooms/${ourRoomId}/invite`,
+                            { member_id: memberId, username })
+                        if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
+                        _syncBc.postMessage({ type: 'invite-sent', memberId })
+                    } catch (err) {
+                        _syncBc.postMessage({ type: 'invite-error', memberId, error: err.message })
+                    }
+                    break
                 }
-                break
-            }
 
-            case 'fetch-members': {
-                const { channelId } = msg
-                try {
-                    const { data } = await apiFetch('GET', `/api/members?channel_id=${channelId}`)
-                    _syncBc.postMessage({ type: 'members-data', channelId, members: data.members ?? data ?? [] })
-                } catch {
-                    _syncBc.postMessage({ type: 'members-error' })
+                case 'fetch-members': {
+                    const { channelId } = msg
+                    try {
+                        const { data } = await apiFetch('GET', `/api/members?channel_id=${channelId}`)
+                        _syncBc.postMessage({ type: 'members-data', channelId, members: data.members ?? data ?? [] })
+                    } catch {
+                        _syncBc.postMessage({ type: 'members-error' })
+                    }
+                    break
                 }
-                break
-            }
 
-            case 'request-state': {
-                const { channelId } = msg
-                _syncBc.postMessage({ type: 'state', ...buildSessionState(channelId) })
-                break
+                case 'request-state': {
+                    const { channelId } = msg
+                    _syncBc.postMessage({ type: 'state', ...buildSessionState(channelId) })
+                    break
+                }
             }
         }
+    }
+
+    if ('locks' in navigator) {
+        // Exclusive lock — first tab gets it and handles all messages.
+        // Other tabs block here and take over automatically when the leader closes.
+        navigator.locks.request('eluth-participants-relay', async () => {
+            attachHandler()
+            await new Promise(resolve => window.addEventListener('unload', resolve, { once: true }))
+        }).catch(() => {})
+    } else {
+        attachHandler()
     }
 }
 
