@@ -249,6 +249,19 @@ async function stopSession(channelId) {
     _syncBc?.postMessage({ type: 'room-closed', channelId, active: false, peers: [] })
 }
 
+// ── WebRTC utilities ──────────────────────────────────────────────────────────
+
+// Strip a=ssrc lines that carry a two-token msid value (stream-id + track-id).
+// Brave/Chrome incognito generates these; non-incognito Brave rejects them as
+// invalid because strict SDP parsers expect a single token after "msid:".
+// These lines are redundant in Unified Plan — a=msid: at the m-section level
+// already provides the same stream/track binding.
+function sanitizeSdp(sdp) {
+    return sdp.split('\r\n')
+        .filter(line => !/^a=ssrc:\d+ msid:/.test(line))
+        .join('\r\n')
+}
+
 // ── WebRTC host side ──────────────────────────────────────────────────────────
 
 async function connectPeer(session, memberId, username, offerSdp, pluginRoomId, apiFetch) {
@@ -284,7 +297,7 @@ async function connectPeer(session, memberId, username, offerSdp, pluginRoomId, 
     }
 
     try {
-        await pc.setRemoteDescription({ type: 'offer', sdp: offerSdp })
+        await pc.setRemoteDescription({ type: 'offer', sdp: sanitizeSdp(offerSdp) })
         const answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         await waitForIce(pc)

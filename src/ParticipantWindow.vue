@@ -81,6 +81,14 @@ let pc = null
 
 const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
 
+// Strip a=ssrc lines with two-token msid values — some browsers generate them,
+// others reject them as invalid. Redundant in Unified Plan anyway.
+function sanitizeSdp(sdp) {
+    return sdp.split('\r\n')
+        .filter(line => !/^a=ssrc:\d+ msid:/.test(line))
+        .join('\r\n')
+}
+
 function base() { return props.apiBase.replace(/\/$/, '') }
 function getMemberId() {
     try { return JSON.parse(atob(props.authToken.split('.')[1])).sub ?? null } catch { return null }
@@ -176,7 +184,7 @@ async function joinSession() {
         // Poll for host answer
         const answerSdp = await pollForAnswer(memberId)
 
-        await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp })
+        await pc.setRemoteDescription({ type: 'answer', sdp: sanitizeSdp(answerSdp) })
 
         // Wait for connection
         await waitForConnection(pc)
