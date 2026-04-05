@@ -1,6 +1,6 @@
 {
   "name": "eluth-advancedstreaming-discussion",
-  "version": "2.2.0",
+  "version": "2.2.2",
   "private": true,
   "scripts": {
     "build": "vite build"
