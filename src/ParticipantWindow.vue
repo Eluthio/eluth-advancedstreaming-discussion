@@ -85,11 +85,11 @@ const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
 // generate/reject them inconsistently).
 // Proactively strips known-incompatible codecs (FEC family, H265) and their RTX
 // chains. If ALL codecs in a section are stripped, the section is rejected
-// (port set to 0) so the rest of the SDP remains parseable and audio can
-// still negotiate.
+// (port set to 0) AND all its a= attributes are also stripped — Brave rejects
+// many standard attributes (rtcp-mux, rtcp-rsize, extmap, etc.) when they appear
+// in rejected sections, one at a time, exhausting the retry loop.
 // extraBadPt: confirmed-bad PTs from the retry loop below.
-// badLines: exact SDP lines rejected at runtime (for plain attributes like a=rtcp-mux).
-const PROACTIVE_BAD_LINES = new Set(['a=rtcp-rsize', 'a=rtcp-mux'])
+// badLines: exact SDP lines rejected at runtime (catch-all for session-level attrs).
 function sanitizeSdp(sdp, extraBadPt = null, badLines = null) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
 
@@ -111,23 +111,28 @@ function sanitizeSdp(sdp, extraBadPt = null, badLines = null) {
         }
     }
 
-    return lines
-        .filter(l => {
-            if (/^a=ssrc[-:]/.test(l)) return false
-            if (PROACTIVE_BAD_LINES.has(l)) return false
-            if (badLines?.has(l)) return false
-            const pt = l.match(/^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)[ /]/)
-            if (pt && badPt.has(pt[1])) return false
-            return true
-        })
-        .map(l => {
-            if (!l.startsWith('m=')) return l
+    const out = []
+    let sectionRejected = false
+    for (const l of lines) {
+        if (l.startsWith('m=')) {
             const parts = l.split(' ')
             const fmts  = parts.slice(3).filter(pt => !badPt.has(pt))
-            if (fmts.length === 0) return [parts[0], '0', parts[2], '0'].join(' ')
-            return [...parts.slice(0, 3), ...fmts].join(' ')
-        })
-        .join('\r\n')
+            sectionRejected = fmts.length === 0
+            out.push(sectionRejected
+                ? [parts[0], '0', parts[2], '0'].join(' ')
+                : [...parts.slice(0, 3), ...fmts].join(' '))
+            continue
+        }
+        if (l.startsWith('a=')) {
+            if (sectionRejected) continue
+            if (/^a=ssrc[-:]/.test(l)) continue
+            if (badLines?.has(l)) continue
+            const pt = l.match(/^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)[ /]/)
+            if (pt && badPt.has(pt[1])) continue
+        }
+        out.push(l)
+    }
+    return out.join('\r\n')
 }
 
 function base() { return apiBase.replace(/\/$/, '') }
