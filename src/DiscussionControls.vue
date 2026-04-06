@@ -257,15 +257,18 @@ function apiFetch(method, path, body) {
 }
 
 // ── SDP sanitisation ───────────────────────────────────────────────────────────
-// Strips a=ssrc lines (Unified Plan doesn't need them; Brave privacy modes
-// generate/reject them inconsistently).
-// Proactively strips known-incompatible codecs (FEC family, H265) and their RTX
-// chains. If ALL codecs in a section are stripped, the section is rejected
-// (port set to 0) AND all its a= attributes are also stripped — Brave rejects
-// many standard attributes (rtcp-mux, rtcp-rsize, extmap, etc.) when they appear
-// in rejected sections, one at a time, exhausting the retry loop.
-// extraBadPt: confirmed-bad PTs from the retry loop below.
-// badLines: exact SDP lines rejected at runtime (catch-all for session-level attrs).
+// Strips a=ssrc lines (Brave privacy mode compat) and known-incompatible codecs
+// (FEC family, H265) plus their RTX chains.
+//
+// If ALL codecs in a section are stripped it is rejected (port=0). Rejected
+// sections keep only their a=mid line (required for BUNDLE coherence) and have
+// all other a= attributes dropped — Brave throws Invalid SDP line errors for
+// every standard attribute (rtcp-mux, extmap, rtcp-fb:*, …) inside rejected
+// sections. The rejected mid is also removed from the session-level
+// a=group:BUNDLE line so Chromium doesn't try to negotiate it.
+//
+// extraBadPt: additional PTs confirmed-bad by the setRemoteDescription retry loop.
+// badLines:   exact SDP lines rejected at runtime (catch-all for session-level attrs).
 function sanitizeSdp(sdp, extraBadPt = null, badLines = null) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
 
@@ -275,22 +278,32 @@ function sanitizeSdp(sdp, extraBadPt = null, badLines = null) {
         const m = l.match(/^a=rtpmap:(\d+) /)
         if (m && BAD_CODECS.test(l)) badPt.add(m[1])
     }
-    // Fixpoint: chase RTX chains — RTX whose apt= target is removed must also be removed
+    // Fixpoint: chase RTX chains — RTX whose apt= target is removed must also go
     let grew = true
     while (grew) {
         grew = false
         for (const l of lines) {
             const m = l.match(/^a=fmtp:(\d+) apt=(\d+)/)
-            if (m && badPt.has(m[2]) && !badPt.has(m[1])) {
-                badPt.add(m[1])
-                grew = true
-            }
+            if (m && badPt.has(m[2]) && !badPt.has(m[1])) { badPt.add(m[1]); grew = true }
         }
     }
 
-    // Emit line by line, tracking whether the current m= section is rejected.
-    // Rejected sections have all a= attributes stripped — parsing them is pointless
-    // and Brave throws Invalid SDP line errors for many standard ones.
+    // Pre-pass: find which mids will be rejected so we can fix a=group:BUNDLE
+    const rejectedMids = new Set()
+    let pendingFmts = null, pendingMidLine = null
+    for (const l of lines) {
+        if (l.startsWith('m=')) {
+            const parts = l.split(' ')
+            pendingFmts = parts.slice(3).filter(pt => !badPt.has(pt))
+            pendingMidLine = null
+        } else if (pendingFmts !== null && l.startsWith('a=mid:')) {
+            pendingMidLine = l.slice(6).trim()
+            if (pendingFmts.length === 0) rejectedMids.add(pendingMidLine)
+            pendingFmts = null
+        }
+    }
+
+    // Emit lines, applying all filters
     const out = []
     let sectionRejected = false
     for (const l of lines) {
@@ -304,11 +317,22 @@ function sanitizeSdp(sdp, extraBadPt = null, badLines = null) {
             continue
         }
         if (l.startsWith('a=')) {
-            if (sectionRejected) continue                          // drop all attrs in rejected sections
-            if (/^a=ssrc[-:]/.test(l)) continue                   // ssrc: Brave privacy mode
-            if (badLines?.has(l)) continue                        // runtime-discovered bad lines
-            const pt = l.match(/^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)[ /]/)
-            if (pt && badPt.has(pt[1])) continue                  // PT-keyed attrs for stripped codecs
+            if (sectionRejected) {
+                // Keep only a=mid so the section is still named for BUNDLE
+                if (!l.startsWith('a=mid:')) continue
+            } else {
+                if (/^a=ssrc[-:]/.test(l)) continue
+                if (badLines?.has(l.trim())) continue
+                // Strip rejected mids from the BUNDLE group
+                if (l.startsWith('a=group:BUNDLE ') && rejectedMids.size) {
+                    const mids = l.slice('a=group:BUNDLE '.length).split(' ')
+                        .filter(mid => !rejectedMids.has(mid))
+                    out.push(mids.length ? 'a=group:BUNDLE ' + mids.join(' ') : 'a=group:')
+                    continue
+                }
+                const pt = l.match(/^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)[ /]/)
+                if (pt && badPt.has(pt[1])) continue
+            }
         }
         out.push(l)
     }
@@ -473,9 +497,11 @@ async function connectPeer(memberId, username, offerSdp, pluginRoomId) {
                 await pc.setRemoteDescription({ type: 'offer', sdp: cleanSdp })
                 sdpSet = true
             } catch (e) {
+                console.warn('[DiscussionControls] SDP attempt', attempt, 'error:', e.message)
                 const mGen = e.message.match(/Failed to parse SessionDescription\. (.+?) Invalid SDP line/)
                 if (!mGen) throw e
-                const badLine = mGen[1]
+                const badLine = mGen[1].trim()
+                console.warn('[DiscussionControls] SDP stripping line:', JSON.stringify(badLine))
                 badLines.add(badLine)
                 const m1 = badLine.match(/^a=fmtp:(\d+) apt=(\d+)/)
                 const m2 = badLine.match(/^a=rtpmap:(\d+) /)
@@ -484,7 +510,10 @@ async function connectPeer(memberId, username, offerSdp, pluginRoomId) {
                 cleanSdp = sanitizeSdp(offerSdp, extraBadPt, badLines)
             }
         }
-        if (!sdpSet) throw new Error('Could not set remote description after stripping incompatible codecs')
+        if (!sdpSet) {
+            console.warn('[DiscussionControls] SDP exhausted retries. badLines:', [...badLines], 'cleanSdp:\n', cleanSdp)
+            throw new Error('Could not set remote description after stripping incompatible codecs')
+        }
         const answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         await waitForIce(pc)
