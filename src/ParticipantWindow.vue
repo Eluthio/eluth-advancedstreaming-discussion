@@ -81,17 +81,14 @@ let pc = null
 
 const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
 
-// Strip a=ssrc lines (cross-browser incompatibility) and any codecs the local
-// browser doesn't support, using RTCRtpReceiver.getCapabilities() where available.
+// Strip a=ssrc lines (Unified Plan doesn't need them; Brave privacy modes
+// generate/reject them inconsistently).
+// extraBadPt: specific PTs to also strip, from the setRemoteDescription retry loop.
 function sanitizeSdp(sdp, extraBadPt = null) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
-
-    const BAD_CODECS = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//
     const badPt = new Set(extraBadPt ?? [])
-    for (const l of lines) {
-        const m = l.match(/^a=rtpmap:(\d+) /)
-        if (m && BAD_CODECS.test(l)) badPt.add(m[1])
-    }
+
+    // Fixpoint: chase RTX chains for any externally-supplied bad PTs
     let grew = true
     while (grew) {
         grew = false
@@ -114,6 +111,7 @@ function sanitizeSdp(sdp, extraBadPt = null) {
             if (!l.startsWith('m=')) return l
             const parts = l.split(' ')
             const fmts = parts.slice(3).filter(pt => !badPt.has(pt))
+            if (fmts.length === 0) return l  // safety: never leave m= with no codecs
             return [...parts.slice(0, 3), ...fmts].join(' ')
         })
         .join('\r\n')
@@ -186,7 +184,6 @@ async function joinSession() {
 
     const memberId = getMemberId()
     const username = getUsername()
-    console.log('[Discussion] joinSession roomId=', roomId, 'memberId=', memberId, 'username=', username)
 
     try {
         pc = new RTCPeerConnection(RTC_CONFIG)
@@ -211,7 +208,6 @@ async function joinSession() {
                 [`${memberId}_status`]:   'connecting',
             },
         })
-        console.log('[Discussion] offer written to roomId=', roomId)
 
         // Poll for host answer
         const answerSdp = await pollForAnswer(memberId)
@@ -263,18 +259,13 @@ async function joinSession() {
 
 async function pollForAnswer(memberId, timeout = 30000) {
     const deadline = Date.now() + timeout
-    let attempt = 0
     while (Date.now() < deadline) {
-        attempt++
         try {
             const res  = await api('GET', `/plugin-rooms/participants/${roomId}`)
             const data = res.room?.data ?? {}
             const sdp  = data[`${memberId}_answer`]
-            if (attempt === 1 || attempt % 5 === 0) console.log('[Discussion] pollForAnswer attempt', attempt, 'keys=', Object.keys(data))
             if (sdp) return sdp
-        } catch (e) {
-            console.warn('[Discussion] pollForAnswer error attempt', attempt, e)
-        }
+        } catch { /* ignore poll error */ }
         await new Promise(r => setTimeout(r, 1500))
     }
     throw new Error('Timed out waiting for host answer')

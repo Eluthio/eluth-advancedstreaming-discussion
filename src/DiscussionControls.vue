@@ -257,20 +257,15 @@ function apiFetch(method, path, body) {
 }
 
 // ── SDP sanitisation ───────────────────────────────────────────────────────────
-// Strip all a=ssrc lines — Unified Plan doesn't need them and Brave's privacy
-// modes generate/reject them inconsistently.
-// Also strips known-incompatible codecs (FEC family, H265) and chases RTX chains.
-// extraBadPt: additional payload types discovered by the connectPeer retry loop.
+// Strips a=ssrc lines (Unified Plan doesn't need them; Brave privacy modes
+// generate/reject them inconsistently).
+// extraBadPt: specific payload types to also strip, discovered by the retry loop
+// below when setRemoteDescription throws "a=fmtp:<pt> apt=<pt> Invalid SDP line".
 function sanitizeSdp(sdp, extraBadPt = null) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
-
-    const BAD_CODECS = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//
     const badPt = new Set(extraBadPt ?? [])
-    for (const l of lines) {
-        const m = l.match(/^a=rtpmap:(\d+) /)
-        if (m && BAD_CODECS.test(l)) badPt.add(m[1])
-    }
-    // Fixpoint: chase RTX chains — RTX whose apt= target is removed must also be removed
+
+    // Fixpoint: chase RTX chains for any externally-supplied bad PTs
     let grew = true
     while (grew) {
         grew = false
@@ -294,6 +289,7 @@ function sanitizeSdp(sdp, extraBadPt = null) {
             if (!l.startsWith('m=')) return l
             const parts = l.split(' ')
             const fmts  = parts.slice(3).filter(pt => !badPt.has(pt))
+            if (fmts.length === 0) return l  // safety: never leave m= with no codecs
             return [...parts.slice(0, 3), ...fmts].join(' ')
         })
         .join('\r\n')
@@ -330,7 +326,6 @@ function broadcastPeersUpdate() {
 
 // ── Session management ─────────────────────────────────────────────────────────
 async function startSession() {
-    console.log('[DiscussionControls] startSession channelId=', channelId, 'token=', _popup?.getAuthToken()?.slice(0, 20) ?? '(none)')
     starting.value = true
     error.value    = ''
     try {
@@ -355,7 +350,6 @@ async function startSession() {
         if (!r2.ok) throw new Error(d2.message ?? d2.error ?? `HTTP ${r2.status}`)
         const ourRoomId = d2.room?.id
 
-        console.log('[DiscussionControls] session started pluginRoomId=', pluginRoomId, 'ourRoomId=', ourRoomId)
         session.value = { active: true, pluginRoomId, ourRoomId }
         syncBc.postMessage({ type: 'room-created', channelId, pluginRoomId, ourRoomId })
         startPolling(pluginRoomId)
@@ -393,17 +387,9 @@ async function pollRoom(pluginRoomId) {
     let data
     try {
         const { res, data: d } = await apiFetch('GET', `/api/plugin-rooms/participants/${pluginRoomId}`)
-        if (!res.ok || !d.room) {
-            console.warn('[DiscussionControls] poll bad response status=', res.status, 'room=', d.room)
-            return
-        }
+        if (!res.ok || !d.room) return
         data = d.room.data ?? {}
-        const offerKeys = Object.keys(data).filter(k => k.endsWith('_offer'))
-        if (offerKeys.length) console.log('[DiscussionControls] poll found offers:', offerKeys, 'answered:', [..._answered])
-    } catch (e) {
-        console.warn('[DiscussionControls] poll error:', e)
-        return
-    }
+    } catch { return }
 
     for (const [key, offerSdp] of Object.entries(data)) {
         if (!key.endsWith('_offer') || typeof offerSdp !== 'string') continue
@@ -480,7 +466,6 @@ async function connectPeer(memberId, username, offerSdp, pluginRoomId) {
             data: { [`${memberId}_answer`]: pc.localDescription.sdp },
         })
         if (!ansRes.ok) throw new Error(`Could not write answer: HTTP ${ansRes.status}`)
-        console.log('[DiscussionControls] answer written for', memberId)
     } catch (err) {
         console.warn('[DiscussionControls] connectPeer failed:', memberId, err)
         const peerEntry = peers.value.find(p => p.memberId === memberId)
@@ -653,7 +638,6 @@ const _handleBeforeUnload = () => {
 }
 
 onMounted(() => {
-    console.log('[DiscussionControls] mounted popup=', !!_popup, 'channelId=', channelId, 'token=', _popup?.getAuthToken()?.slice(0, 20) ?? '(none)')
     syncBc       = new BroadcastChannel('eluth-discussion-sync')
     compositorBc = new BroadcastChannel(`eluth-stream-${channelId}`)
     compositorBc.onmessage = (e) => {
