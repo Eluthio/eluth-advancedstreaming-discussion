@@ -260,10 +260,9 @@ function apiFetch(method, path, body) {
 // Strips a=ssrc lines (Unified Plan doesn't need them; Brave privacy modes
 // generate/reject them inconsistently).
 // Proactively strips known-incompatible codecs (FEC family, H265) and their RTX
-// chains — BUT only for media sections that have at least one surviving codec.
-// If stripping would empty a section's m= line, that section is left untouched
-// so the browser can at least attempt negotiation.
-// extraBadPt: additional payload types from the setRemoteDescription retry loop.
+// chains. If ALL codecs in a section are stripped, the section is rejected
+// (port set to 0) so the rest of the SDP remains parseable and audio can
+// still negotiate. extraBadPt: confirmed-bad PTs from the retry loop below.
 function sanitizeSdp(sdp, extraBadPt = null) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
 
@@ -286,15 +285,6 @@ function sanitizeSdp(sdp, extraBadPt = null) {
         }
     }
 
-    // Per-section safety: if stripping would leave a section with zero codecs,
-    // exempt that section's payload types so it's passed through intact.
-    for (const l of lines) {
-        if (!l.startsWith('m=')) continue
-        const pts      = l.split(' ').slice(3)
-        const surviving = pts.filter(pt => !badPt.has(pt))
-        if (surviving.length === 0) pts.forEach(pt => badPt.delete(pt))
-    }
-
     return lines
         .filter(l => {
             if (/^a=ssrc[-:]/.test(l)) return false
@@ -306,6 +296,9 @@ function sanitizeSdp(sdp, extraBadPt = null) {
             if (!l.startsWith('m=')) return l
             const parts = l.split(' ')
             const fmts  = parts.slice(3).filter(pt => !badPt.has(pt))
+            // If all codecs were stripped, reject this section (port 0) so the
+            // SDP remains parseable. Audio can still negotiate independently.
+            if (fmts.length === 0) return [parts[0], '0', parts[2], '0'].join(' ')
             return [...parts.slice(0, 3), ...fmts].join(' ')
         })
         .join('\r\n')
@@ -467,10 +460,11 @@ async function connectPeer(memberId, username, offerSdp, pluginRoomId) {
                 await pc.setRemoteDescription({ type: 'offer', sdp: cleanSdp })
                 sdpSet = true
             } catch (e) {
-                const m = e.message.match(/a=fmtp:(\d+) apt=(\d+) Invalid SDP line/)
-                if (!m) throw e
-                extraBadPt.add(m[1])
-                extraBadPt.add(m[2])
+                const m1 = e.message.match(/a=fmtp:(\d+) apt=(\d+) Invalid SDP line/)
+                const m2 = e.message.match(/a=rtpmap:(\d+) \S+ Invalid SDP line/)
+                if (!m1 && !m2) throw e
+                if (m1) { extraBadPt.add(m1[1]); extraBadPt.add(m1[2]) }
+                if (m2) extraBadPt.add(m2[1])
                 cleanSdp = sanitizeSdp(offerSdp, extraBadPt)
             }
         }

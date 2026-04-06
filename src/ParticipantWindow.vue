@@ -107,15 +107,6 @@ function sanitizeSdp(sdp, extraBadPt = null) {
         }
     }
 
-    // Per-section safety: if stripping would leave a section with zero codecs,
-    // exempt that section's payload types so it's passed through intact.
-    for (const l of lines) {
-        if (!l.startsWith('m=')) continue
-        const pts      = l.split(' ').slice(3)
-        const surviving = pts.filter(pt => !badPt.has(pt))
-        if (surviving.length === 0) pts.forEach(pt => badPt.delete(pt))
-    }
-
     return lines
         .filter(l => {
             if (/^a=ssrc[-:]/.test(l)) return false
@@ -126,7 +117,8 @@ function sanitizeSdp(sdp, extraBadPt = null) {
         .map(l => {
             if (!l.startsWith('m=')) return l
             const parts = l.split(' ')
-            const fmts = parts.slice(3).filter(pt => !badPt.has(pt))
+            const fmts  = parts.slice(3).filter(pt => !badPt.has(pt))
+            if (fmts.length === 0) return [parts[0], '0', parts[2], '0'].join(' ')
             return [...parts.slice(0, 3), ...fmts].join(' ')
         })
         .join('\r\n')
@@ -235,10 +227,11 @@ async function joinSession() {
                 await pc.setRemoteDescription({ type: 'answer', sdp: cleanSdp })
                 sdpSet = true
             } catch (e) {
-                const m = e.message.match(/a=fmtp:(\d+) apt=(\d+) Invalid SDP line/)
-                if (!m) throw e
-                extraBadPt.add(m[1])
-                extraBadPt.add(m[2])
+                const m1 = e.message.match(/a=fmtp:(\d+) apt=(\d+) Invalid SDP line/)
+                const m2 = e.message.match(/a=rtpmap:(\d+) \S+ Invalid SDP line/)
+                if (!m1 && !m2) throw e
+                if (m1) { extraBadPt.add(m1[1]); extraBadPt.add(m1[2]) }
+                if (m2) extraBadPt.add(m2[1])
                 cleanSdp = sanitizeSdp(answerSdp, extraBadPt)
             }
         }
