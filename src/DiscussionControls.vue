@@ -318,8 +318,7 @@ function sanitizeSdp(sdp, extraBadPt = null, badLines = null) {
         }
         if (l.startsWith('a=')) {
             if (sectionRejected) {
-                // Keep only a=mid so the section is still named for BUNDLE
-                if (!l.startsWith('a=mid:')) continue
+                continue  // drop ALL a= from rejected sections; BUNDLE group already fixed above
             } else {
                 if (/^a=ssrc[-:]/.test(l)) continue
                 if (badLines?.has(l.trim())) continue
