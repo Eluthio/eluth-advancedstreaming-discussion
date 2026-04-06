@@ -330,6 +330,7 @@ function broadcastPeersUpdate() {
 
 // ── Session management ─────────────────────────────────────────────────────────
 async function startSession() {
+    console.log('[DiscussionControls] startSession channelId=', channelId, 'token=', _popup?.getAuthToken()?.slice(0, 20) ?? '(none)')
     starting.value = true
     error.value    = ''
     try {
@@ -354,6 +355,7 @@ async function startSession() {
         if (!r2.ok) throw new Error(d2.message ?? d2.error ?? `HTTP ${r2.status}`)
         const ourRoomId = d2.room?.id
 
+        console.log('[DiscussionControls] session started pluginRoomId=', pluginRoomId, 'ourRoomId=', ourRoomId)
         session.value = { active: true, pluginRoomId, ourRoomId }
         syncBc.postMessage({ type: 'room-created', channelId, pluginRoomId, ourRoomId })
         startPolling(pluginRoomId)
@@ -391,9 +393,17 @@ async function pollRoom(pluginRoomId) {
     let data
     try {
         const { res, data: d } = await apiFetch('GET', `/api/plugin-rooms/participants/${pluginRoomId}`)
-        if (!res.ok || !d.room) return
+        if (!res.ok || !d.room) {
+            console.warn('[DiscussionControls] poll bad response status=', res.status, 'room=', d.room)
+            return
+        }
         data = d.room.data ?? {}
-    } catch { return }
+        const offerKeys = Object.keys(data).filter(k => k.endsWith('_offer'))
+        if (offerKeys.length) console.log('[DiscussionControls] poll found offers:', offerKeys, 'answered:', [..._answered])
+    } catch (e) {
+        console.warn('[DiscussionControls] poll error:', e)
+        return
+    }
 
     for (const [key, offerSdp] of Object.entries(data)) {
         if (!key.endsWith('_offer') || typeof offerSdp !== 'string') continue
@@ -466,9 +476,11 @@ async function connectPeer(memberId, username, offerSdp, pluginRoomId) {
         const answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         await waitForIce(pc)
-        await apiFetch('PUT', `/api/plugin-rooms/participants/${pluginRoomId}/data`, {
+        const { res: ansRes } = await apiFetch('PUT', `/api/plugin-rooms/participants/${pluginRoomId}/data`, {
             data: { [`${memberId}_answer`]: pc.localDescription.sdp },
         })
+        if (!ansRes.ok) throw new Error(`Could not write answer: HTTP ${ansRes.status}`)
+        console.log('[DiscussionControls] answer written for', memberId)
     } catch (err) {
         console.warn('[DiscussionControls] connectPeer failed:', memberId, err)
         const peerEntry = peers.value.find(p => p.memberId === memberId)
@@ -641,6 +653,7 @@ const _handleBeforeUnload = () => {
 }
 
 onMounted(() => {
+    console.log('[DiscussionControls] mounted popup=', !!_popup, 'channelId=', channelId, 'token=', _popup?.getAuthToken()?.slice(0, 20) ?? '(none)')
     syncBc       = new BroadcastChannel('eluth-discussion-sync')
     compositorBc = new BroadcastChannel(`eluth-stream-${channelId}`)
     compositorBc.onmessage = (e) => {

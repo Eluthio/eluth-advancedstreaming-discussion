@@ -186,6 +186,7 @@ async function joinSession() {
 
     const memberId = getMemberId()
     const username = getUsername()
+    console.log('[Discussion] joinSession roomId=', roomId, 'memberId=', memberId, 'username=', username)
 
     try {
         pc = new RTCPeerConnection(RTC_CONFIG)
@@ -210,6 +211,7 @@ async function joinSession() {
                 [`${memberId}_status`]:   'connecting',
             },
         })
+        console.log('[Discussion] offer written to roomId=', roomId)
 
         // Poll for host answer
         const answerSdp = await pollForAnswer(memberId)
@@ -261,13 +263,18 @@ async function joinSession() {
 
 async function pollForAnswer(memberId, timeout = 30000) {
     const deadline = Date.now() + timeout
+    let attempt = 0
     while (Date.now() < deadline) {
+        attempt++
         try {
             const res  = await api('GET', `/plugin-rooms/participants/${roomId}`)
             const data = res.room?.data ?? {}
             const sdp  = data[`${memberId}_answer`]
+            if (attempt === 1 || attempt % 5 === 0) console.log('[Discussion] pollForAnswer attempt', attempt, 'keys=', Object.keys(data))
             if (sdp) return sdp
-        } catch { /* ignore poll error */ }
+        } catch (e) {
+            console.warn('[Discussion] pollForAnswer error attempt', attempt, e)
+        }
         await new Promise(r => setTimeout(r, 1500))
     }
     throw new Error('Timed out waiting for host answer')
