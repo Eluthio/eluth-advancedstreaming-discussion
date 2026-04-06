@@ -288,6 +288,7 @@ function sanitizeSdp(sdp, extraBadPt = null) {
     return lines
         .filter(l => {
             if (/^a=ssrc[-:]/.test(l)) return false
+            if (l === 'a=rtcp-rsize') return false
             const pt = l.match(/^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)[ /]/)
             if (pt && badPt.has(pt[1])) return false
             return true
