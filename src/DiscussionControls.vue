@@ -259,13 +259,21 @@ function apiFetch(method, path, body) {
 // ── SDP sanitisation ───────────────────────────────────────────────────────────
 // Strips a=ssrc lines (Unified Plan doesn't need them; Brave privacy modes
 // generate/reject them inconsistently).
-// extraBadPt: specific payload types to also strip, discovered by the retry loop
-// below when setRemoteDescription throws "a=fmtp:<pt> apt=<pt> Invalid SDP line".
+// Proactively strips known-incompatible codecs (FEC family, H265) and their RTX
+// chains — BUT only for media sections that have at least one surviving codec.
+// If stripping would empty a section's m= line, that section is left untouched
+// so the browser can at least attempt negotiation.
+// extraBadPt: additional payload types from the setRemoteDescription retry loop.
 function sanitizeSdp(sdp, extraBadPt = null) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
-    const badPt = new Set(extraBadPt ?? [])
 
-    // Fixpoint: chase RTX chains for any externally-supplied bad PTs
+    const BAD_CODECS = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//
+    const badPt = new Set(extraBadPt ?? [])
+    for (const l of lines) {
+        const m = l.match(/^a=rtpmap:(\d+) /)
+        if (m && BAD_CODECS.test(l)) badPt.add(m[1])
+    }
+    // Fixpoint: chase RTX chains — RTX whose apt= target is removed must also be removed
     let grew = true
     while (grew) {
         grew = false
@@ -276,6 +284,15 @@ function sanitizeSdp(sdp, extraBadPt = null) {
                 grew = true
             }
         }
+    }
+
+    // Per-section safety: if stripping would leave a section with zero codecs,
+    // exempt that section's payload types so it's passed through intact.
+    for (const l of lines) {
+        if (!l.startsWith('m=')) continue
+        const pts      = l.split(' ').slice(3)
+        const surviving = pts.filter(pt => !badPt.has(pt))
+        if (surviving.length === 0) pts.forEach(pt => badPt.delete(pt))
     }
 
     return lines
@@ -289,7 +306,6 @@ function sanitizeSdp(sdp, extraBadPt = null) {
             if (!l.startsWith('m=')) return l
             const parts = l.split(' ')
             const fmts  = parts.slice(3).filter(pt => !badPt.has(pt))
-            if (fmts.length === 0) return l  // safety: never leave m= with no codecs
             return [...parts.slice(0, 3), ...fmts].join(' ')
         })
         .join('\r\n')
