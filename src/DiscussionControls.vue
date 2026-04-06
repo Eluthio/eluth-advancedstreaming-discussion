@@ -262,8 +262,11 @@ function apiFetch(method, path, body) {
 // Proactively strips known-incompatible codecs (FEC family, H265) and their RTX
 // chains. If ALL codecs in a section are stripped, the section is rejected
 // (port set to 0) so the rest of the SDP remains parseable and audio can
-// still negotiate. extraBadPt: confirmed-bad PTs from the retry loop below.
-function sanitizeSdp(sdp, extraBadPt = null) {
+// still negotiate.
+// extraBadPt: confirmed-bad PTs from the retry loop below.
+// badLines: exact SDP lines rejected at runtime (for plain attributes like a=rtcp-mux).
+const PROACTIVE_BAD_LINES = new Set(['a=rtcp-rsize', 'a=rtcp-mux'])
+function sanitizeSdp(sdp, extraBadPt = null, badLines = null) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
 
     const BAD_CODECS = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//
@@ -288,7 +291,8 @@ function sanitizeSdp(sdp, extraBadPt = null) {
     return lines
         .filter(l => {
             if (/^a=ssrc[-:]/.test(l)) return false
-            if (l === 'a=rtcp-rsize') return false
+            if (PROACTIVE_BAD_LINES.has(l)) return false
+            if (badLines?.has(l)) return false
             const pt = l.match(/^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)[ /]/)
             if (pt && badPt.has(pt[1])) return false
             return true
@@ -450,10 +454,12 @@ async function connectPeer(memberId, username, offerSdp, pluginRoomId) {
     }
 
     try {
-        // Retry loop: if setRemoteDescription fails with "a=fmtp:<rtx> apt=<pt>
-        // Invalid SDP line", the browser silently rejected <pt>'s definition.
-        // Extract the bad payload types from the error, re-sanitize, and retry.
+        // Retry loop: on "X Invalid SDP line" parse errors, extract the
+        // offending line/PT from the error message, add it to the strip sets,
+        // and re-sanitize. Handles PT-keyed lines (rtpmap/fmtp) and plain
+        // attributes (rtcp-mux, rtcp-rsize, etc.) uniformly.
         const extraBadPt = new Set()
+        const badLines   = new Set()
         let cleanSdp = sanitizeSdp(offerSdp)
         let sdpSet   = false
         for (let attempt = 0; attempt < 30 && !sdpSet; attempt++) {
@@ -461,12 +467,15 @@ async function connectPeer(memberId, username, offerSdp, pluginRoomId) {
                 await pc.setRemoteDescription({ type: 'offer', sdp: cleanSdp })
                 sdpSet = true
             } catch (e) {
-                const m1 = e.message.match(/a=fmtp:(\d+) apt=(\d+) Invalid SDP line/)
-                const m2 = e.message.match(/a=rtpmap:(\d+) \S+ Invalid SDP line/)
-                if (!m1 && !m2) throw e
+                const mGen = e.message.match(/Failed to parse SessionDescription\. (.+?) Invalid SDP line/)
+                if (!mGen) throw e
+                const badLine = mGen[1]
+                badLines.add(badLine)
+                const m1 = badLine.match(/^a=fmtp:(\d+) apt=(\d+)/)
+                const m2 = badLine.match(/^a=rtpmap:(\d+) /)
                 if (m1) { extraBadPt.add(m1[1]); extraBadPt.add(m1[2]) }
                 if (m2) extraBadPt.add(m2[1])
-                cleanSdp = sanitizeSdp(offerSdp, extraBadPt)
+                cleanSdp = sanitizeSdp(offerSdp, extraBadPt, badLines)
             }
         }
         if (!sdpSet) throw new Error('Could not set remote description after stripping incompatible codecs')

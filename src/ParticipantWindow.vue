@@ -84,9 +84,13 @@ const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
 // Strip a=ssrc lines (Unified Plan doesn't need them; Brave privacy modes
 // generate/reject them inconsistently).
 // Proactively strips known-incompatible codecs (FEC family, H265) and their RTX
-// chains — BUT only for media sections that have at least one surviving codec.
-// extraBadPt: additional PTs from the setRemoteDescription retry loop.
-function sanitizeSdp(sdp, extraBadPt = null) {
+// chains. If ALL codecs in a section are stripped, the section is rejected
+// (port set to 0) so the rest of the SDP remains parseable and audio can
+// still negotiate.
+// extraBadPt: confirmed-bad PTs from the retry loop below.
+// badLines: exact SDP lines rejected at runtime (for plain attributes like a=rtcp-mux).
+const PROACTIVE_BAD_LINES = new Set(['a=rtcp-rsize', 'a=rtcp-mux'])
+function sanitizeSdp(sdp, extraBadPt = null, badLines = null) {
     const lines = sdp.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
 
     const BAD_CODECS = /^a=rtpmap:(\d+) (?:ulpfec|red|flexfec-03|H265)\//
@@ -110,7 +114,8 @@ function sanitizeSdp(sdp, extraBadPt = null) {
     return lines
         .filter(l => {
             if (/^a=ssrc[-:]/.test(l)) return false
-            if (l === 'a=rtcp-rsize') return false
+            if (PROACTIVE_BAD_LINES.has(l)) return false
+            if (badLines?.has(l)) return false
             const pt = l.match(/^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)[ /]/)
             if (pt && badPt.has(pt[1])) return false
             return true
@@ -221,6 +226,7 @@ async function joinSession() {
         const answerSdp = await pollForAnswer(memberId)
 
         const extraBadPt = new Set()
+        const badLines   = new Set()
         let cleanSdp = sanitizeSdp(answerSdp)
         let sdpSet = false
         for (let attempt = 0; attempt < 30 && !sdpSet; attempt++) {
@@ -228,12 +234,15 @@ async function joinSession() {
                 await pc.setRemoteDescription({ type: 'answer', sdp: cleanSdp })
                 sdpSet = true
             } catch (e) {
-                const m1 = e.message.match(/a=fmtp:(\d+) apt=(\d+) Invalid SDP line/)
-                const m2 = e.message.match(/a=rtpmap:(\d+) \S+ Invalid SDP line/)
-                if (!m1 && !m2) throw e
+                const mGen = e.message.match(/Failed to parse SessionDescription\. (.+?) Invalid SDP line/)
+                if (!mGen) throw e
+                const badLine = mGen[1]
+                badLines.add(badLine)
+                const m1 = badLine.match(/^a=fmtp:(\d+) apt=(\d+)/)
+                const m2 = badLine.match(/^a=rtpmap:(\d+) /)
                 if (m1) { extraBadPt.add(m1[1]); extraBadPt.add(m1[2]) }
                 if (m2) extraBadPt.add(m2[1])
-                cleanSdp = sanitizeSdp(answerSdp, extraBadPt)
+                cleanSdp = sanitizeSdp(answerSdp, extraBadPt, badLines)
             }
         }
         if (!sdpSet) throw new Error('Could not set remote description after stripping incompatible codecs')
